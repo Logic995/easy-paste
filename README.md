@@ -7,6 +7,11 @@
 
 Easy Paste is a native macOS clipboard manager focused on a fast, fluid Paste-like experience.
 
+## Requirements
+
+- macOS 13.0 or later.
+- Xcode / Swift toolchain for source builds.
+
 ## Features
 
 - Clipboard history for text, links, rich text, and images.
