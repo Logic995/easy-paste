@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var lastTargetApplication: NSRunningApplication?
     private var activationObserver: NSObjectProtocol?
+    private var isClearingLocalData = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -50,6 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             clipboardController: clipboardController,
             onPreferencesChanged: { [weak self] in
                 self?.preferencesDidChange()
+            },
+            onClearLocalData: { [weak self] in
+                self?.confirmAndClearLocalData()
             }
         )
         hotKeyController = HotKeyController { [weak self] in
@@ -77,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
         }
-        clipboardController.stop()
+        clipboardController.stop(save: !isClearingLocalData)
         hotKeyController.unregister()
     }
 
@@ -99,6 +103,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
+    @objc private func clearLocalDataAndQuitFromMenu() {
+        confirmAndClearLocalData()
+    }
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "EP"
@@ -108,9 +116,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: L10n.t("menu.show"), action: #selector(showPanelFromMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L10n.t("menu.settings"), action: #selector(openSettingsFromMenu), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: L10n.t("menu.clearLocalDataAndQuit"), action: #selector(clearLocalDataAndQuitFromMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: L10n.t("menu.quit"), action: #selector(quitFromMenu), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
         statusItem.menu = menu
+    }
+
+    private func confirmAndClearLocalData() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.t("cleanup.confirmTitle")
+        alert.informativeText = L10n.t("cleanup.confirmText")
+        alert.addButton(withTitle: L10n.t("cleanup.confirmButton"))
+        alert.addButton(withTitle: L10n.t("settings.cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        performLocalDataCleanupAndQuit()
+    }
+
+    private func performLocalDataCleanupAndQuit() {
+        let stateFile = store.fileURL
+        do {
+            try LocalDataCleanup.validateSupportDirectory(
+                LocalDataCleanup.supportDirectory(forStateFile: stateFile)
+            )
+        } catch {
+            showLocalDataCleanupError(error)
+            return
+        }
+
+        panelController.prepareForLocalDataCleanup()
+        let restoreLoginItem = store.preferences.openAtLogin
+        clipboardController.stop(save: false)
+        hotKeyController.unregister()
+        LoginItemManager.setEnabled(false)
+
+        do {
+            try LocalDataCleanup.clearSupportDirectory(forStateFile: stateFile) { url in
+                var trashedURL: NSURL?
+                try FileManager.default.trashItem(at: url, resultingItemURL: &trashedURL)
+            }
+            isClearingLocalData = true
+            NSApp.terminate(nil)
+        } catch LocalDataCleanupError.supportDirectoryMissing {
+            isClearingLocalData = true
+            NSApp.terminate(nil)
+        } catch {
+            clipboardController.start()
+            hotKeyController.register(shortcut: store.preferences.activationShortcut)
+            LoginItemManager.setEnabled(restoreLoginItem)
+            showLocalDataCleanupError(error)
+        }
+    }
+
+    private func showLocalDataCleanupError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = L10n.t("cleanup.errorTitle")
+        alert.informativeText = String(format: L10n.t("cleanup.errorText"), error.localizedDescription)
+        alert.addButton(withTitle: L10n.t("cleanup.errorButton"))
+        alert.runModal()
     }
 
     private func startTrackingTargetApplication() {

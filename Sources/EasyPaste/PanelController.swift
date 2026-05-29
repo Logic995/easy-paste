@@ -70,6 +70,7 @@ final class PanelController: NSObject {
     private let store: ClipboardStore
     private let clipboardController: ClipboardController
     private let onPreferencesChanged: () -> Void
+    private let onClearLocalData: () -> Void
     private let window: QuickPanel
     private var targetApplication: NSRunningApplication?
 
@@ -117,10 +118,16 @@ final class PanelController: NSObject {
     private let cardStack = NSStackView()
     private weak var emptyView: NSView?
 
-    init(store: ClipboardStore, clipboardController: ClipboardController, onPreferencesChanged: @escaping () -> Void = {}) {
+    init(
+        store: ClipboardStore,
+        clipboardController: ClipboardController,
+        onPreferencesChanged: @escaping () -> Void = {},
+        onClearLocalData: @escaping () -> Void = {}
+    ) {
         self.store = store
         self.clipboardController = clipboardController
         self.onPreferencesChanged = onPreferencesChanged
+        self.onClearLocalData = onClearLocalData
 
         // 选最大的屏幕作为 scale 基准，让 UI 在大屏上更舒展、小屏上更紧凑。
         let largestScreen = NSScreen.screens.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
@@ -302,6 +309,7 @@ final class PanelController: NSObject {
     func hideAnimated() {
         guard window.isVisible else { return }
         guard let layer = rootView.layer else {
+            resetSearchStateForNextShow()
             window.orderOut(nil)
             return
         }
@@ -317,6 +325,7 @@ final class PanelController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.window.orderOut(nil)
+                self.resetSearchStateForNextShow()
                 self.updateShortcutHints(mode: .none)
                 self.stopPanelKeyMonitoring()
                 self.stopModifierMonitoring()
@@ -369,6 +378,13 @@ final class PanelController: NSObject {
 
     func openSettingsFromMenu() {
         openSettings()
+    }
+
+    func prepareForLocalDataCleanup() {
+        dismissFormatPicker()
+        settingsWindowController?.close()
+        settingsWindowController = nil
+        hideAnimated()
     }
 
     private func reloadDataKeepingLeadingEdge() {
@@ -675,7 +691,13 @@ final class PanelController: NSObject {
         // 搜索框居中、固定为 toolbar 宽度的 ~60%（带上下限），保持合适比例不撑满。
         // 1) 中心对齐 toolbar 中线  2) 等比宽度 60%  3) 不允许超过左/右两侧按钮组
         searchField.placeholder = L10n.t("panel.searchPlaceholder")
-        searchField.onTextChange = { [weak self] _ in self?.reloadData() }
+        searchField.onTextChange = { [weak self] text in
+            guard let self else { return }
+            self.reloadData()
+            if text.isEmpty {
+                self.collapseEmptySearch()
+            }
+        }
         searchField.onCommitOrCancel = { [weak self] in self?.handleSearchCommitOrCancel() }
         searchField.onHorizontalNavigation = { [weak self] delta in self?.moveSelection(by: delta) }
         searchField.isHidden = true
@@ -740,8 +762,29 @@ final class PanelController: NSObject {
     /// 失焦或回车：如果搜索框为空，自动收起回初始按钮态。
     private func handleSearchCommitOrCancel() {
         if searchField.stringValue.isEmpty {
-            setSearchInline(false)
+            collapseEmptySearch()
         }
+    }
+
+    private func collapseEmptySearch() {
+        guard !searchField.isHidden else { return }
+        setSearchInline(false)
+    }
+
+    private func resetSearchStateForNextShow() {
+        searchField.layer?.removeAllAnimations()
+        toolbarLeftGroup?.layer?.removeAllAnimations()
+        toolbarCenterGroup?.layer?.removeAllAnimations()
+        searchField.stringValue = ""
+        searchField.isHidden = true
+        searchField.alphaValue = 0
+        searchField.layer?.setAffineTransform(.identity)
+        toolbarLeftGroup?.isHidden = false
+        toolbarCenterGroup?.isHidden = false
+        toolbarLeftGroup?.alphaValue = 1
+        toolbarCenterGroup?.alphaValue = 1
+        searchToggleButton.isActive = false
+        window.makeFirstResponder(nil)
     }
 
     /// 内联展开/收起搜索框：动画过渡 — 三组按钮淡出 + 搜索框淡入并轻微放大。
@@ -1024,15 +1067,7 @@ final class PanelController: NSObject {
             guard let self else { return event }
             guard event.window === self.window, self.window.isVisible else { return event }
 
-            let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-            guard mods.isEmpty else { return event }
-
-            if event.keyCode == 123 {
-                self.moveSelection(by: -1)
-                return nil
-            }
-            if event.keyCode == 124 {
-                self.moveSelection(by: 1)
+            if self.handlePanelShortcut(event) {
                 return nil
             }
 
@@ -1496,6 +1531,30 @@ final class PanelController: NSObject {
     // MARK: - Key handling
 
     private func handleKey(_ event: NSEvent) -> Bool {
+        if handlePanelShortcut(event) {
+            return true
+        }
+
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let isEditingSearch = window.firstResponder === searchField.currentEditor()
+        let noMods = mods.isEmpty
+
+        if noMods,
+           let characters = event.characters,
+           characters.count == 1,
+           let scalar = characters.unicodeScalars.first,
+           !CharacterSet.controlCharacters.contains(scalar) {
+            if isEditingSearch {
+                return false
+            }
+            appendSearchCharacter(characters.lowercased())
+            return true
+        }
+
+        return false
+    }
+
+    private func handlePanelShortcut(_ event: NSEvent) -> Bool {
         if let picker = formatPicker {
             if picker.handleKey(event) {
                 return true
@@ -1605,18 +1664,6 @@ final class PanelController: NSObject {
             return true
         }
 
-        if noMods,
-           let characters = event.characters,
-           characters.count == 1,
-           let scalar = characters.unicodeScalars.first,
-           !CharacterSet.controlCharacters.contains(scalar) {
-            if isEditingSearch {
-                return false
-            }
-            appendSearchCharacter(characters.lowercased())
-            return true
-        }
-
         return false
     }
 
@@ -1693,7 +1740,7 @@ final class PanelController: NSObject {
         searchField.stringValue.removeLast()
         reloadData()
         if searchField.stringValue.isEmpty {
-            setSearchInline(false)
+            collapseEmptySearch()
         } else {
             searchField.currentEditor()?.selectedRange = NSRange(location: searchField.stringValue.count, length: 0)
         }
@@ -1751,6 +1798,7 @@ final class PanelController: NSObject {
             stopModifierMonitoring()
             updateShortcutHints(mode: .none)
             let finalTransform = effectiveTransform(transform, for: item)
+            resetSearchStateForNextShow()
             window.orderOut(nil)
             NSApp.deactivate()
             if store.preferences.pasteDestination == .clipboard {
@@ -1850,6 +1898,7 @@ final class PanelController: NSObject {
         menu.addItem(NSMenuItem.separator())
 
         menu.addItem(NSMenuItem(title: L10n.t("menu.clearUnpinned"), action: #selector(clearUnpinned), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: L10n.t("menu.clearLocalDataAndQuit"), action: #selector(clearLocalDataAndQuitAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L10n.t("menu.quit"), action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
 
@@ -1861,6 +1910,10 @@ final class PanelController: NSObject {
         NSApp.terminate(nil)
     }
 
+    @objc private func clearLocalDataAndQuitAction() {
+        onClearLocalData()
+    }
+
     @objc private func openSettingsAction() {
         openSettings()
     }
@@ -1868,14 +1921,20 @@ final class PanelController: NSObject {
     private func openSettings() {
         ignoreResignKeyUntil = Date().addingTimeInterval(1.0)
         if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController(store: store) { [weak self] needsReload in
-                guard let self else { return }
-                self.applyTheme()
-                if needsReload {
-                    self.reloadDataKeepingLeadingEdge()
-                    self.onPreferencesChanged()
+            settingsWindowController = SettingsWindowController(
+                store: store,
+                onChange: { [weak self] needsReload in
+                    guard let self else { return }
+                    self.applyTheme()
+                    if needsReload {
+                        self.reloadDataKeepingLeadingEdge()
+                        self.onPreferencesChanged()
+                    }
+                },
+                onClearLocalData: { [weak self] in
+                    self?.onClearLocalData()
                 }
-            }
+            )
         }
         settingsWindowController?.show(relativeTo: window)
     }
@@ -1923,13 +1982,13 @@ final class PanelController: NSObject {
 
     private func promptCreatePinboard() {
         let alert = NSAlert()
-        alert.messageText = "新建 Pinboard"
-        alert.informativeText = "给这个 Pinboard 起个名字"
-        alert.addButton(withTitle: "创建")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t("pinboard.createTitle")
+        alert.informativeText = L10n.t("pinboard.createHint")
+        alert.addButton(withTitle: L10n.t("pinboard.create"))
+        alert.addButton(withTitle: L10n.t("settings.cancel"))
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        input.placeholderString = "Pinboard 名称"
+        input.placeholderString = L10n.t("pinboard.namePlaceholder")
         alert.accessoryView = input
 
         isPresentingPanelDialog = true
@@ -1953,10 +2012,10 @@ final class PanelController: NSObject {
         guard case .board(let id) = selector else { return }
 
         let menu = NSMenu()
-        let renameItem = NSMenuItem(title: "重命名…", action: #selector(renameCurrentBoardAction), keyEquivalent: "")
+        let renameItem = NSMenuItem(title: L10n.t("pinboard.rename"), action: #selector(renameCurrentBoardAction), keyEquivalent: "")
         renameItem.target = self
         renameItem.representedObject = id
-        let deleteItem = NSMenuItem(title: "删除 Pinboard", action: #selector(deleteCurrentBoardAction), keyEquivalent: "")
+        let deleteItem = NSMenuItem(title: L10n.t("pinboard.delete"), action: #selector(deleteCurrentBoardAction), keyEquivalent: "")
         deleteItem.target = self
         deleteItem.representedObject = id
         menu.addItem(renameItem)
@@ -1969,9 +2028,9 @@ final class PanelController: NSObject {
     @objc private func renameCurrentBoardAction(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? UUID else { return }
         let alert = NSAlert()
-        alert.messageText = "重命名 Pinboard"
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t("pinboard.renameTitle")
+        alert.addButton(withTitle: L10n.t("pinboard.save"))
+        alert.addButton(withTitle: L10n.t("settings.cancel"))
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
         input.stringValue = store.name(for: .board(id))
         alert.accessoryView = input
@@ -2008,13 +2067,13 @@ final class PanelController: NSObject {
         guard let item = store.items.first(where: { $0.id == itemID }) else { return }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: item.pinned ? "从 Pinned 移除" : "收藏到 Pinned", action: #selector(togglePinned), keyEquivalent: " "))
-        menu.addItem(NSMenuItem(title: "复制", action: #selector(copyOriginalAction), keyEquivalent: "c"))
-        let copyPlain = NSMenuItem(title: "复制为纯文本", action: #selector(copyPlainAction), keyEquivalent: "c")
+        menu.addItem(NSMenuItem(title: item.pinned ? L10n.t("menu.unpin") : L10n.t("menu.pin"), action: #selector(togglePinned), keyEquivalent: " "))
+        menu.addItem(NSMenuItem(title: L10n.t("menu.copy"), action: #selector(copyOriginalAction), keyEquivalent: "c"))
+        let copyPlain = NSMenuItem(title: L10n.t("menu.copyPlain"), action: #selector(copyPlainAction), keyEquivalent: "c")
         copyPlain.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(copyPlain)
-        menu.addItem(NSMenuItem(title: "格式化粘贴…", action: #selector(presentFormatPickerAction), keyEquivalent: ""))
-        let deleteItem = NSMenuItem(title: "删除", action: #selector(deleteSelected), keyEquivalent: "\u{8}")
+        menu.addItem(NSMenuItem(title: L10n.t("menu.formatPaste"), action: #selector(presentFormatPickerAction), keyEquivalent: ""))
+        let deleteItem = NSMenuItem(title: L10n.t("menu.delete"), action: #selector(deleteSelected), keyEquivalent: "\u{8}")
         deleteItem.keyEquivalentModifierMask = []
         menu.addItem(deleteItem)
         menu.addItem(NSMenuItem.separator())
@@ -2028,7 +2087,7 @@ final class PanelController: NSObject {
                 mItem.target = self
                 boardsMenu.addItem(mItem)
             }
-            let parent = NSMenuItem(title: "Pinboards", action: nil, keyEquivalent: "")
+            let parent = NSMenuItem(title: L10n.t("menu.pinboards"), action: nil, keyEquivalent: "")
             parent.submenu = boardsMenu
             menu.addItem(parent)
         }
