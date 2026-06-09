@@ -94,7 +94,7 @@ final class ClipboardController {
         return NSSize(width: width, height: height)
     }
 
-    func stop() {
+    func stop(save: Bool = true) {
         timer?.invalidate()
         timer = nil
         pendingSaveTask?.cancel()
@@ -103,7 +103,9 @@ final class ClipboardController {
         ocrWorkerTask = nil
         ocrQueue.removeAll()
         queuedOCRHashes.removeAll()
-        try? store.save()
+        if save {
+            try? store.save()
+        }
     }
 
     func copy(_ item: ClipboardItem, transform: ClipboardTransform) throws {

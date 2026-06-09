@@ -3,27 +3,67 @@ import ImageIO
 import EasyPasteCore
 
 /// 卡片尺寸/字号按一个 scale 因子统一缩放，避免在不同分辨率屏幕上比例失调。
-@MainActor
+enum ClipCardVisualStyle {
+    case classic
+    case cardHandExperimental
+}
+
 struct CardMetrics {
     let scale: CGFloat
-    var cardWidth: CGFloat { round(228 * scale) }
-    var cardHeight: CGFloat { round(216 * scale) }
-    var cornerRadius: CGFloat { round(12 * scale) }
-    var headerHeight: CGFloat { round(46 * scale) }
-    var footerHeight: CGFloat { round(25 * scale) }
+    let visualStyle: ClipCardVisualStyle
+    let viewportWidth: CGFloat?
+
+    init(
+        scale: CGFloat,
+        visualStyle: ClipCardVisualStyle = .classic,
+        viewportWidth: CGFloat? = nil
+    ) {
+        self.scale = scale
+        self.visualStyle = visualStyle
+        self.viewportWidth = viewportWidth
+    }
+
+    private var handViewportWidth: CGFloat {
+        viewportWidth ?? 1440
+    }
+
+    private var isHandTablet: Bool {
+        visualStyle == .cardHandExperimental && handViewportWidth <= 980
+    }
+
+    private var isHandMobile: Bool {
+        visualStyle == .cardHandExperimental && handViewportWidth <= 560
+    }
+
+    var cardWidth: CGFloat {
+        guard visualStyle == .cardHandExperimental else { return round(228 * scale) }
+        return isHandMobile ? 146 : (isHandTablet ? 176 : 218)
+    }
+
+    var cardHeight: CGFloat {
+        guard visualStyle == .cardHandExperimental else { return round(216 * scale) }
+        return round(cardWidth * 1.255)
+    }
+
+    var cornerRadius: CGFloat { visualStyle == .cardHandExperimental ? 14 : round(12 * scale) }
+    var headerHeight: CGFloat { visualStyle == .cardHandExperimental ? 56 : round(46 * scale) }
+    var footerHeight: CGFloat { visualStyle == .cardHandExperimental ? 32 : round(25 * scale) }
     /// footer 内文字距离顶部分割线的留白
-    var footerTopPad: CGFloat { round(6 * scale) }
-    var hPad: CGFloat { round(12 * scale) }
-    var badgeSize: CGFloat { headerHeight }
-    var badgeIconBleed: CGFloat { round(7 * scale) }
-    var badgeRadius: CGFloat { round(10 * scale) }
-    var typeFontSize: CGFloat { 13 * scale }
-    var timeFontSize: CGFloat { 11 * scale }
-    var pinFontSize: CGFloat { 13 * scale }
-    var badgeFontSize: CGFloat { 17 * scale }
-    var bodyFontSize: CGFloat { 12 * scale }
-    var footerFontSize: CGFloat { 11 * scale }
-    var bodyTopPad: CGFloat { round(10 * scale) }
+    var footerTopPad: CGFloat { visualStyle == .cardHandExperimental ? 9 : round(6 * scale) }
+    var hPad: CGFloat {
+        guard visualStyle == .cardHandExperimental else { return round(12 * scale) }
+        return isHandMobile ? 12 : 14
+    }
+    var badgeSize: CGFloat { visualStyle == .cardHandExperimental ? 33 : headerHeight }
+    var badgeIconBleed: CGFloat { visualStyle == .cardHandExperimental ? 4 : round(7 * scale) }
+    var badgeRadius: CGFloat { visualStyle == .cardHandExperimental ? 9 : round(10 * scale) }
+    var typeFontSize: CGFloat { visualStyle == .cardHandExperimental ? 13 : 13 * scale }
+    var timeFontSize: CGFloat { visualStyle == .cardHandExperimental ? 10.5 : 11 * scale }
+    var pinFontSize: CGFloat { visualStyle == .cardHandExperimental ? 12 : 13 * scale }
+    var badgeFontSize: CGFloat { visualStyle == .cardHandExperimental ? 16 : 17 * scale }
+    var bodyFontSize: CGFloat { visualStyle == .cardHandExperimental ? 12 : 12 * scale }
+    var footerFontSize: CGFloat { visualStyle == .cardHandExperimental ? 10.5 : 11 * scale }
+    var bodyTopPad: CGFloat { visualStyle == .cardHandExperimental ? 0 : round(10 * scale) }
 }
 
 /// 全局缺省值（在 PanelController 设置实际 scale 之前用）。
@@ -73,14 +113,36 @@ final class ClipCardView: NSView {
         didSet { updateShortcutHint() }
     }
 
+    var presentationTransform: CGAffineTransform = .identity {
+        didSet { if !isBatchingHandPresentation { updateSelection() } }
+    }
+
+    var handHoverTranslationY: CGFloat = 34 {
+        didSet { if !isBatchingHandPresentation { updateSelection() } }
+    }
+
+    var handHoverScale: CGFloat = 1.018 {
+        didSet { if !isBatchingHandPresentation { updateSelection() } }
+    }
+
+    var handBaseZPosition: CGFloat = 0 {
+        didSet { if !isBatchingHandPresentation { updateSelection() } }
+    }
+
+    var allowsHitTesting = true
+
     private let item: ClipboardItem
     private let metrics: CardMetrics
     private let renderMode: ClipCardRenderMode
+    private let visualStyle: ClipCardVisualStyle
     private let header = NSView()
     private let selectionRing = NSView()
     private let clickOverlay = CardClickOverlay()
     private weak var headerGradient: CAGradientLayer?
     private weak var bodyGradient: CAGradientLayer?
+    private weak var handChromeView: HandCardChromeView?
+    private weak var handSelectionLine: NSView?
+    private weak var handReflectionView: NSView?
     private weak var badgeIconView: NSImageView?
     private weak var imagePreviewView: NSImageView?
     private weak var textPreviewField: NSTextField?
@@ -97,6 +159,8 @@ final class ClipCardView: NSView {
     private static var trimmedIconCache: [String: NSImage] = [:]
     private static var headerColorCache: [String: NSColor] = [:]
     private static let sourceIconLoadQueue = DispatchQueue(label: "com.easypaste.card-icon-load", qos: .utility)
+    private var suppressHandSelectionAnimation = false
+    private var isBatchingHandPresentation = false
     private var isHovering = false {
         didSet { updateSelection() }
     }
@@ -104,11 +168,13 @@ final class ClipCardView: NSView {
     init(
         item: ClipboardItem,
         metrics: CardMetrics = CardLayout.current,
-        renderMode: ClipCardRenderMode = .hydrated
+        renderMode: ClipCardRenderMode = .hydrated,
+        visualStyle: ClipCardVisualStyle = .classic
     ) {
         self.item = item
         self.metrics = metrics
         self.renderMode = renderMode
+        self.visualStyle = visualStyle
         itemID = item.id
         super.init(frame: .zero)
         build()
@@ -123,6 +189,11 @@ final class ClipCardView: NSView {
         true
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard allowsHitTesting else { return nil }
+        return super.hitTest(point)
+    }
+
     private func handleMouseDown(with event: NSEvent) {
         isMouseDownInside = true
         wasSelectedOnMouseDown = isSelected
@@ -131,7 +202,9 @@ final class ClipCardView: NSView {
 
     private func handleMouseUp(with event: NSEvent) {
         let clickedInside = isMouseDownInside && bounds.contains(convert(event.locationInWindow, from: nil))
-        let shouldPaste = clickedInside && (wasSelectedOnMouseDown || event.modifierFlags.contains(.shift))
+        // Hand cards overlap and re-layer while selecting, so pointer clicks are selection-only there.
+        let allowsMousePaste = visualStyle != .cardHandExperimental
+        let shouldPaste = allowsMousePaste && clickedInside && (wasSelectedOnMouseDown || event.modifierFlags.contains(.shift))
         isMouseDownInside = false
         if shouldPaste {
             onSelect?(itemID, true, event.modifierFlags)
@@ -161,7 +234,83 @@ final class ClipCardView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovering = true }
-    override func mouseExited(with event: NSEvent) { isHovering = false }
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        handChromeView?.glintPoint = CGPoint(x: 0.5, y: 0.18)
+    }
+
+    func setHandPresentation(
+        transform: CGAffineTransform,
+        hoverTranslationY: CGFloat,
+        hoverScale: CGFloat,
+        zPosition: CGFloat,
+        animated: Bool
+    ) {
+        guard visualStyle == .cardHandExperimental else {
+            presentationTransform = transform
+            return
+        }
+        let previousSuppression = suppressHandSelectionAnimation
+        let previousBatching = isBatchingHandPresentation
+        suppressHandSelectionAnimation = !animated
+        isBatchingHandPresentation = true
+        presentationTransform = transform
+        handHoverTranslationY = hoverTranslationY
+        handHoverScale = hoverScale
+        handBaseZPosition = zPosition
+        isBatchingHandPresentation = previousBatching
+        updateSelection()
+        suppressHandSelectionAnimation = previousSuppression
+    }
+
+    func setHandSelected(_ selected: Bool, animated: Bool) {
+        guard visualStyle == .cardHandExperimental else {
+            isSelected = selected
+            return
+        }
+        let previousSuppression = suppressHandSelectionAnimation
+        suppressHandSelectionAnimation = !animated
+        isSelected = selected
+        suppressHandSelectionAnimation = previousSuppression
+    }
+
+    func playHandDealAnimation(
+        delay: TimeInterval,
+        initialRotation: CGFloat,
+        initialScale: CGFloat,
+        verticalDrop: CGFloat
+    ) {
+        guard visualStyle == .cardHandExperimental,
+              let layer,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            return
+        }
+
+        layer.removeAnimation(forKey: "handDeal")
+        let group = CAAnimationGroup()
+        group.duration = 0.54
+        group.beginTime = CACurrentMediaTime() + delay
+        group.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 0.92, 0.22, 1.00)
+        group.fillMode = .backwards
+        group.isRemovedOnCompletion = true
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+
+        let position = CABasicAnimation(keyPath: "position.y")
+        position.fromValue = layer.position.y - verticalDrop
+        position.toValue = layer.position.y
+
+        let transform = CABasicAnimation(keyPath: "transform")
+        transform.fromValue = CATransform3DMakeAffineTransform(
+            CGAffineTransform(rotationAngle: initialRotation).scaledBy(x: initialScale, y: initialScale)
+        )
+        transform.toValue = layer.transform
+
+        group.animations = [fade, position, transform]
+        layer.add(group, forKey: "handDeal")
+    }
 
     override func layout() {
         super.layout()
@@ -178,16 +327,28 @@ final class ClipCardView: NSView {
             g.frame = superlayer.bounds
             CATransaction.commit()
         }
-        // 卡片保持贴合面板，不做浮动阴影。
         if let layer {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            layer.shadowPath = nil
+            if visualStyle == .cardHandExperimental {
+                let shadowInset = bounds.insetBy(dx: 11 * metrics.scale, dy: -18 * metrics.scale)
+                layer.shadowPath = NSBezierPath(roundedRect: shadowInset, xRadius: 999, yRadius: 999).cgPath
+            } else {
+                layer.shadowPath = nil
+            }
             CATransaction.commit()
         }
     }
 
     private func build() {
+        if visualStyle == .cardHandExperimental {
+            buildHandCard()
+            return
+        }
+        buildClassicCard()
+    }
+
+    private func buildClassicCard() {
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(equalToConstant: metrics.cardWidth).isActive = true
         heightAnchor.constraint(equalToConstant: metrics.cardHeight).isActive = true
@@ -383,6 +544,195 @@ final class ClipCardView: NSView {
         updateShortcutHint()
     }
 
+    private func buildHandCard() {
+        translatesAutoresizingMaskIntoConstraints = true
+        frame.size = NSSize(width: metrics.cardWidth, height: metrics.cardHeight)
+        wantsLayer = true
+        layer?.cornerRadius = metrics.cornerRadius
+        layer?.masksToBounds = false
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.borderWidth = 0
+        layer?.anchorPoint = CGPoint(x: 0.5, y: -0.15)
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.42
+        layer?.shadowRadius = 30 * metrics.scale
+        layer?.shadowOffset = NSSize(width: 0, height: -16 * metrics.scale)
+
+        let reflection = NSView()
+        reflection.wantsLayer = true
+        reflection.layer?.cornerRadius = 999
+        reflection.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.54).cgColor
+        reflection.layer?.shadowColor = NSColor.black.cgColor
+        reflection.layer?.shadowOpacity = 0.72
+        reflection.layer?.shadowRadius = 13 * metrics.scale
+        reflection.layer?.shadowOffset = .zero
+        reflection.alphaValue = 0.72
+        reflection.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(reflection)
+        handReflectionView = reflection
+
+        let chrome = HandCardChromeView(
+            accentColor: handAccentColor,
+            cornerRadius: metrics.cornerRadius,
+            scale: metrics.scale,
+            theme: EasyPasteThemeStore.effectiveTheme
+        )
+        chrome.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(chrome)
+        handChromeView = chrome
+
+        let accentRail = NSView()
+        accentRail.wantsLayer = true
+        accentRail.layer?.cornerRadius = 999
+        accentRail.layer?.backgroundColor = handAccentColor.withAlphaComponent(item.pinned ? 0.92 : 0.70).cgColor
+        accentRail.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(accentRail)
+
+        let sourceBadge = makeHandSourceBadge()
+        chrome.addSubview(sourceBadge)
+
+        let titleLabel = NSTextField(labelWithString: sourceDisplayName)
+        titleLabel.font = .systemFont(ofSize: 12.6 * metrics.scale, weight: .semibold)
+        titleLabel.textColor = handPrimaryText
+        titleLabel.backgroundColor = .clear
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(titleLabel)
+
+        let metaLabel = NSTextField(labelWithString: handHeaderMetaText)
+        metaLabel.font = .systemFont(ofSize: 10.2 * metrics.scale, weight: .medium)
+        metaLabel.textColor = handMutedText
+        metaLabel.backgroundColor = .clear
+        metaLabel.lineBreakMode = .byTruncatingTail
+        metaLabel.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(metaLabel)
+
+        let typePill = makeHandKindPill()
+        chrome.addSubview(typePill)
+
+        let previewBox = makeHandPreviewBox()
+        chrome.addSubview(previewBox)
+
+        let footerInfoLabel = NSTextField(labelWithString: handFooterSummaryText)
+        footerInfoLabel.font = .systemFont(ofSize: 10.2 * metrics.scale, weight: .medium)
+        footerInfoLabel.textColor = handMutedText
+        footerInfoLabel.backgroundColor = .clear
+        footerInfoLabel.lineBreakMode = .byTruncatingMiddle
+        footerInfoLabel.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(footerInfoLabel)
+
+        shortcutLabel.font = .systemFont(ofSize: metrics.footerFontSize + 1, weight: .bold)
+        shortcutLabel.textColor = handSecondaryText
+        shortcutLabel.backgroundColor = .clear
+        shortcutLabel.alignment = .right
+        shortcutLabel.isHidden = true
+        shortcutLabel.alphaValue = 0
+        shortcutLabel.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(shortcutLabel)
+
+        let selectionLine = HandSelectionLineView()
+        selectionLine.wantsLayer = true
+        selectionLine.layer?.cornerRadius = 999
+        selectionLine.alphaValue = 0
+        selectionLine.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(selectionLine)
+        handSelectionLine = selectionLine
+
+        selectionRing.wantsLayer = true
+        selectionRing.layer?.cornerRadius = metrics.cornerRadius
+        selectionRing.layer?.borderWidth = 1
+        selectionRing.layer?.borderColor = EasyPasteThemeStore.effectiveTheme.handQuietBorder.cgColor
+        selectionRing.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(selectionRing)
+
+        clickOverlay.translatesAutoresizingMaskIntoConstraints = false
+        clickOverlay.onMouseDown = { [weak self] event in
+            self?.handleMouseDown(with: event)
+        }
+        clickOverlay.onMouseUp = { [weak self] event in
+            self?.handleMouseUp(with: event)
+        }
+        clickOverlay.onRightMouseDown = { [weak self] event in
+            self?.handleRightMouseDown(with: event)
+        }
+        addSubview(clickOverlay)
+
+        let h = metrics.hPad
+        NSLayoutConstraint.activate([
+            reflection.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 23 * metrics.scale),
+            reflection.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -23 * metrics.scale),
+            reflection.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24 * metrics.scale),
+            reflection.heightAnchor.constraint(equalToConstant: 30 * metrics.scale),
+
+            chrome.leadingAnchor.constraint(equalTo: leadingAnchor),
+            chrome.trailingAnchor.constraint(equalTo: trailingAnchor),
+            chrome.topAnchor.constraint(equalTo: topAnchor),
+            chrome.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            accentRail.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 9 * metrics.scale),
+            accentRail.topAnchor.constraint(equalTo: chrome.topAnchor, constant: 13 * metrics.scale),
+            accentRail.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -12 * metrics.scale),
+            accentRail.widthAnchor.constraint(equalToConstant: 2.5 * metrics.scale),
+
+            sourceBadge.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: h + 4 * metrics.scale),
+            sourceBadge.topAnchor.constraint(equalTo: chrome.topAnchor, constant: 12 * metrics.scale),
+            sourceBadge.widthAnchor.constraint(equalToConstant: 24 * metrics.scale),
+            sourceBadge.heightAnchor.constraint(equalToConstant: 24 * metrics.scale),
+
+            typePill.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -h),
+            typePill.topAnchor.constraint(equalTo: chrome.topAnchor, constant: 12 * metrics.scale),
+            typePill.heightAnchor.constraint(equalToConstant: 22 * metrics.scale),
+            typePill.widthAnchor.constraint(greaterThanOrEqualToConstant: 38 * metrics.scale),
+
+            titleLabel.leadingAnchor.constraint(equalTo: sourceBadge.trailingAnchor, constant: 8 * metrics.scale),
+            titleLabel.topAnchor.constraint(equalTo: chrome.topAnchor, constant: 9 * metrics.scale),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: typePill.leadingAnchor, constant: -10 * metrics.scale),
+
+            metaLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            metaLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1 * metrics.scale),
+            metaLabel.trailingAnchor.constraint(lessThanOrEqualTo: chrome.trailingAnchor, constant: -h),
+
+            previewBox.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: h),
+            previewBox.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -h),
+            previewBox.topAnchor.constraint(equalTo: chrome.topAnchor, constant: 50 * metrics.scale),
+            previewBox.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -30 * metrics.scale),
+
+            footerInfoLabel.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: h),
+            footerInfoLabel.trailingAnchor.constraint(lessThanOrEqualTo: shortcutLabel.leadingAnchor, constant: -8 * metrics.scale),
+            footerInfoLabel.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -9 * metrics.scale),
+
+            shortcutLabel.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -h),
+            shortcutLabel.bottomAnchor.constraint(equalTo: footerInfoLabel.bottomAnchor),
+            shortcutLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 14 * metrics.scale),
+
+            selectionLine.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 17 * metrics.scale),
+            selectionLine.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -17 * metrics.scale),
+            selectionLine.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -5 * metrics.scale),
+            selectionLine.heightAnchor.constraint(equalToConstant: 1.5 * metrics.scale),
+
+            selectionRing.leadingAnchor.constraint(equalTo: leadingAnchor),
+            selectionRing.trailingAnchor.constraint(equalTo: trailingAnchor),
+            selectionRing.topAnchor.constraint(equalTo: topAnchor),
+            selectionRing.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            clickOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            clickOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            clickOverlay.topAnchor.constraint(equalTo: topAnchor),
+            clickOverlay.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+
+        updateSelection()
+        updateShortcutHint()
+    }
+
+    private func updateHandTransformOriginPreservingFrame() {
+        guard visualStyle == .cardHandExperimental,
+              let layer else { return }
+        let oldFrame = frame
+        layer.anchorPoint = CGPoint(x: 0.5, y: -0.15)
+        frame = oldFrame
+    }
+
     private func makeBadge() -> NSView {
         let badge = NSView()
         badge.wantsLayer = true
@@ -406,6 +756,207 @@ final class ClipCardView: NSView {
             icon.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: bleed)
         ])
         return badge
+    }
+
+    private func makeHandBadge() -> NSView {
+        let badge = HandBadgeView(cornerRadius: metrics.badgeRadius)
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = metrics.badgeRadius
+        badge.layer?.masksToBounds = true
+        badge.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = NSImageView()
+        icon.image = handSymbolImage
+        icon.contentTintColor = handAccentColor
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        badge.addSubview(icon)
+
+        NSLayoutConstraint.activate([
+            icon.centerXAnchor.constraint(equalTo: badge.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 17 * metrics.scale),
+            icon.heightAnchor.constraint(equalToConstant: 17 * metrics.scale)
+        ])
+        return badge
+    }
+
+    private func makeHandSourceBadge() -> NSView {
+        let badge = NSView()
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 7 * metrics.scale
+        badge.layer?.backgroundColor = EasyPasteThemeStore.effectiveTheme.handBadgeBackground.cgColor
+        badge.layer?.borderWidth = 0.8
+        badge.layer?.borderColor = EasyPasteThemeStore.effectiveTheme.handBadgeBorder.cgColor
+        badge.layer?.masksToBounds = true
+        badge.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = NSImageView()
+        icon.image = displayAppIcon(allowsExpensiveLoad: renderMode == .hydrated) ?? fallbackIcon
+        icon.contentTintColor = handAccentColor.withAlphaComponent(0.92)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        badgeIconView = icon
+        badge.addSubview(icon)
+
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: badge.leadingAnchor, constant: 3 * metrics.scale),
+            icon.trailingAnchor.constraint(equalTo: badge.trailingAnchor, constant: -3 * metrics.scale),
+            icon.topAnchor.constraint(equalTo: badge.topAnchor, constant: 3 * metrics.scale),
+            icon.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: -3 * metrics.scale)
+        ])
+        return badge
+    }
+
+    private func makeHandKindPill() -> NSTextField {
+        let pill = NSTextField(labelWithString: handKindChipText)
+        pill.font = .systemFont(ofSize: 9.4 * metrics.scale, weight: .semibold)
+        pill.textColor = handAccentColor.withAlphaComponent(0.95)
+        pill.backgroundColor = .clear
+        pill.alignment = .center
+        pill.lineBreakMode = .byTruncatingTail
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 999
+        pill.layer?.backgroundColor = handAccentColor.withAlphaComponent(0.105).cgColor
+        pill.layer?.borderWidth = 0.8
+        pill.layer?.borderColor = handAccentColor.withAlphaComponent(0.25).cgColor
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        return pill
+    }
+
+    private func makeHandPreviewBox() -> NSView {
+        let preview = NSView()
+        preview.wantsLayer = true
+        preview.layer?.cornerRadius = 8 * metrics.scale
+        preview.layer?.backgroundColor = EasyPasteThemeStore.effectiveTheme.handPreviewBottom.cgColor
+        preview.layer?.masksToBounds = true
+        preview.translatesAutoresizingMaskIntoConstraints = false
+
+        let gradient = CAGradientLayer()
+        gradient.colors = [
+            EasyPasteThemeStore.effectiveTheme.handPreviewTop.cgColor,
+            EasyPasteThemeStore.effectiveTheme.handPreviewBottom.cgColor
+        ]
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        gradient.frame = .zero
+        gradient.zPosition = 0
+        preview.layer?.addSublayer(gradient)
+        bodyGradient = gradient
+
+        switch item.kind {
+        case .image:
+            let image: NSImage?
+            if renderMode == .hydrated,
+               let data = imagePNGData {
+                image = NSImage(data: data)
+            } else {
+                image = nil
+            }
+            let imageStage = HandImagePreviewView(
+                image: image,
+                placeholder: placeholderImage,
+                accentColor: handAccentColor,
+                metrics: metrics,
+                theme: EasyPasteThemeStore.effectiveTheme
+            )
+            imageStage.translatesAutoresizingMaskIntoConstraints = false
+            preview.addSubview(imageStage)
+            imagePreviewView = imageStage.imageView
+            NSLayoutConstraint.activate([
+                imageStage.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
+                imageStage.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
+                imageStage.topAnchor.constraint(equalTo: preview.topAnchor),
+                imageStage.bottomAnchor.constraint(equalTo: preview.bottomAnchor)
+            ])
+        case .url:
+            let urlPreview = makeHandURLPreview()
+            preview.addSubview(urlPreview)
+            NSLayoutConstraint.activate([
+                urlPreview.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
+                urlPreview.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
+                urlPreview.topAnchor.constraint(equalTo: preview.topAnchor),
+                urlPreview.bottomAnchor.constraint(equalTo: preview.bottomAnchor)
+            ])
+        default:
+            let useMono = item.kind != .text
+            let previewText = Self.clippedPreview(handReadablePreviewText, limit: 820)
+            let previewLabel = NSTextField(labelWithString: "")
+            let previewFont: NSFont = useMono
+                ? .monospacedSystemFont(ofSize: 10.2 * metrics.scale, weight: .regular)
+                : .systemFont(ofSize: 11.45 * metrics.scale, weight: .regular)
+            let para = NSMutableParagraphStyle()
+            para.lineSpacing = useMono ? 1.55 * metrics.scale : 1.85 * metrics.scale
+            para.lineBreakMode = .byCharWrapping
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: previewFont,
+                .foregroundColor: handSecondaryText,
+                .paragraphStyle: para
+            ]
+            previewLabel.attributedStringValue = useMono
+                ? syntaxHighlightedPreview(
+                    previewText,
+                    baseAttributes: attrs,
+                    baseFont: previewFont,
+                    paragraphStyle: para
+                )
+                : NSAttributedString(string: previewText, attributes: attrs)
+            previewLabel.font = previewFont
+            previewLabel.textColor = handSecondaryText
+            previewLabel.backgroundColor = .clear
+            previewLabel.lineBreakMode = .byCharWrapping
+            previewLabel.maximumNumberOfLines = 0
+            previewLabel.cell?.wraps = true
+            previewLabel.cell?.isScrollable = false
+            previewLabel.cell?.usesSingleLineMode = false
+            previewLabel.translatesAutoresizingMaskIntoConstraints = false
+            textPreviewField = previewLabel
+            preview.addSubview(previewLabel)
+            NSLayoutConstraint.activate([
+                previewLabel.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 10 * metrics.scale),
+                previewLabel.trailingAnchor.constraint(equalTo: preview.trailingAnchor, constant: -10 * metrics.scale),
+                previewLabel.topAnchor.constraint(equalTo: preview.topAnchor, constant: 9 * metrics.scale),
+                previewLabel.bottomAnchor.constraint(lessThanOrEqualTo: preview.bottomAnchor, constant: -9 * metrics.scale)
+            ])
+        }
+
+        return preview
+    }
+
+    private func makeHandURLPreview() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let hostLabel = NSTextField(labelWithString: handURLHostText)
+        hostLabel.font = .systemFont(ofSize: 12.2 * metrics.scale, weight: .semibold)
+        hostLabel.textColor = handPrimaryText
+        hostLabel.backgroundColor = .clear
+        hostLabel.lineBreakMode = .byTruncatingTail
+        hostLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(hostLabel)
+
+        let label = NSTextField(labelWithString: Self.clippedPreview(previewSourceText, limit: 620))
+        label.font = .monospacedSystemFont(ofSize: 10.2 * metrics.scale, weight: .regular)
+        label.textColor = handSecondaryText
+        label.backgroundColor = .clear
+        label.lineBreakMode = .byCharWrapping
+        label.maximumNumberOfLines = 0
+        label.cell?.wraps = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        textPreviewField = label
+        container.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            hostLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10 * metrics.scale),
+            hostLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10 * metrics.scale),
+            hostLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 9 * metrics.scale),
+
+            label.leadingAnchor.constraint(equalTo: hostLabel.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: hostLabel.trailingAnchor),
+            label.topAnchor.constraint(equalTo: hostLabel.bottomAnchor, constant: 7 * metrics.scale),
+            label.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -9 * metrics.scale)
+        ])
+        return container
     }
 
     private func makeBody() -> NSView {
@@ -557,6 +1108,10 @@ final class ClipCardView: NSView {
     }
 
     private func updateSelection() {
+        if visualStyle == .cardHandExperimental {
+            updateHandSelection()
+            return
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer?.shadowOpacity = 0
@@ -571,8 +1126,54 @@ final class ClipCardView: NSView {
             ? NSColor.controlAccentColor
             : hoverColor
         ).cgColor
-        layer?.setAffineTransform(.identity)
+        layer?.setAffineTransform(presentationTransform)
         CATransaction.commit()
+    }
+
+    private func updateHandSelection() {
+        updateHandTransformOriginPreservingFrame()
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let shouldAnimate = window?.isVisible == true && !reduceMotion && !suppressHandSelectionAnimation
+        let theme = EasyPasteThemeStore.effectiveTheme
+        let selectedColor = theme.handSelectedBorder
+        let hoverColor = theme.handHoverBorder
+        let quietColor = theme.handQuietBorder
+        let effectiveTransform = presentationTransform
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(!shouldAnimate)
+        if shouldAnimate {
+            CATransaction.setAnimationDuration(0.14)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.16, 0.88, 0.20, 1.00))
+        }
+        layer?.shadowOpacity = isSelected ? 0.58 : 0.40
+        layer?.shadowRadius = isSelected ? 64 : 28
+        layer?.shadowOffset = NSSize(width: 0, height: isSelected ? -30 : -14)
+        layer?.zPosition = handBaseZPosition
+        selectionRing.layer?.borderWidth = isSelected ? 1.35 : (isHovering ? 1.0 : 0.8)
+        selectionRing.layer?.borderColor = (isSelected ? selectedColor : (isHovering ? hoverColor : quietColor)).cgColor
+        selectionRing.layer?.shadowColor = handAccentColor.cgColor
+        selectionRing.layer?.shadowOpacity = isSelected ? 0.16 : 0
+        selectionRing.layer?.shadowRadius = isSelected ? 34 : 0
+        selectionRing.layer?.shadowOffset = .zero
+        handChromeView?.isSelected = isSelected
+        handChromeView?.isHovering = isHovering
+        handReflectionView?.alphaValue = isSelected ? 0.88 : 0.70
+        handSelectionLine?.alphaValue = isSelected ? 1 : 0
+        handSelectionLine?.layer?.setAffineTransform(CGAffineTransform(scaleX: isSelected ? 1 : 0.62, y: 1))
+        layer?.setAffineTransform(effectiveTransform)
+        CATransaction.commit()
+        updateHandBreatheAnimation()
+    }
+
+    private func updateHandBreatheAnimation() {
+        guard visualStyle == .cardHandExperimental else { return }
+        handChromeView?.layer?.removeAnimation(forKey: "selectedBreathe")
+        handSelectionLine?.layer?.removeAnimation(forKey: "selectedLineBreathe")
+        selectionRing.layer?.removeAnimation(forKey: "selectedGlowBreathe")
+        selectionRing.layer?.removeAnimation(forKey: "selectedGlowRadiusBreathe")
+        handChromeView?.layer?.opacity = 1
+        handSelectionLine?.layer?.opacity = isSelected ? 1 : 0
     }
 
     private func updateShortcutHint() {
@@ -629,12 +1230,14 @@ final class ClipCardView: NSView {
             icon: displayAppIcon(allowsExpensiveLoad: false),
             headerColor: headerColor(allowsExpensiveLoad: false),
             image: hydratedPreviewImage(),
-            richPreview: item.kind == .image ? nil : richPreviewText
+            richPreview: visualStyle == .classic && item.kind != .image ? richPreviewText : nil
         )
         hydrateSourceIconAsync()
 
         if let headerColor = payload.headerColor {
-            applyHeaderColor(headerColor)
+            if visualStyle == .classic {
+                applyHeaderColor(headerColor)
+            }
         }
 
         if let icon = payload.icon {
@@ -749,8 +1352,63 @@ final class ClipCardView: NSView {
         }
     }
 
+    private var handAccentColor: NSColor {
+        if item.pinned {
+            return NSColor(calibratedRed: 0.88, green: 0.55, blue: 0.67, alpha: 1)
+        }
+        switch item.kind {
+        case .text:
+            return NSColor(calibratedRed: 0.47, green: 0.67, blue: 1.00, alpha: 1)
+        case .image:
+            return NSColor(calibratedRed: 0.47, green: 0.84, blue: 0.74, alpha: 1)
+        case .json, .xml, .yaml, .sql, .code, .markdown:
+            return NSColor(calibratedRed: 0.85, green: 0.73, blue: 0.47, alpha: 1)
+        case .url:
+            return NSColor(calibratedRed: 0.72, green: 0.66, blue: 1.00, alpha: 1)
+        }
+    }
+
+    private var handPrimaryText: NSColor {
+        EasyPasteThemeStore.effectiveTheme.handPrimaryText
+    }
+
+    private var handSecondaryText: NSColor {
+        EasyPasteThemeStore.effectiveTheme.handSecondaryText
+    }
+
+    private var handMutedText: NSColor {
+        EasyPasteThemeStore.effectiveTheme.handMutedText
+    }
+
+    private var handSymbolImage: NSImage? {
+        let name: String
+        if item.pinned {
+            name = "pin.fill"
+        } else {
+            switch item.kind {
+            case .text:
+                name = "text.alignleft"
+            case .image:
+                name = "photo"
+            case .json, .xml, .yaml:
+                name = "curlybraces"
+            case .sql:
+                name = "tablecells"
+            case .code, .markdown:
+                name = "chevron.left.forwardslash.chevron.right"
+            case .url:
+                name = "link"
+            }
+        }
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: metrics.badgeFontSize, weight: .medium))
+    }
+
     private var headerTitle: String {
-        item.kind == .image ? "Image" : kindLabel
+        if item.pinned, item.kind != .image {
+            return "Pinned \(kindLabel)"
+        }
+        return item.kind == .image ? "Image" : kindLabel
     }
 
     private var headerSubtitle: String {
@@ -848,6 +1506,128 @@ final class ClipCardView: NSView {
     private var characterCountText: String {
         let count = item.text?.count ?? item.preview.count
         return "\(Self.groupedNumber(count)) character\(count == 1 ? "" : "s")"
+    }
+
+    private var handCharacterCountText: String {
+        let count = item.text?.count ?? item.preview.count
+        return "\(Self.groupedNumber(count)) char\(count == 1 ? "" : "s")"
+    }
+
+    private var sourceDisplayName: String {
+        let trimmed = item.sourceApp.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Unknown" }
+        return trimmed
+    }
+
+    private var handKindChipText: String {
+        if item.pinned { return "PIN" }
+        switch item.kind {
+        case .text:     return "TEXT"
+        case .image:    return "IMG"
+        case .url:      return "URL"
+        case .json:     return "JSON"
+        case .xml:      return "XML"
+        case .yaml:     return "YAML"
+        case .sql:      return "SQL"
+        case .markdown: return "MD"
+        case .code:     return "CODE"
+        }
+    }
+
+    private var handHeaderMetaText: String {
+        let time = relativeTime(from: item.updatedAt)
+        if item.pinned {
+            return "\(time) · Pinned"
+        }
+        return "\(time) · \(handCompactInfoText)"
+    }
+
+    private var handCompactInfoText: String {
+        if item.kind == .image {
+            let info = imageInfoParts(allowsExpensiveLoad: renderMode == .hydrated)
+            if let size = info.size {
+                return "\(info.dimensions) · \(size)"
+            }
+            return info.dimensions
+        }
+        return handCharacterCountText
+    }
+
+    private var handFooterSummaryText: String {
+        let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = previewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if item.kind == .image {
+            guard !title.isEmpty else { return handCompactInfoText }
+            return "\(title) · \(handCompactInfoText)"
+        }
+        if !title.isEmpty, title != preview {
+            return title
+        }
+        return handCompactInfoText
+    }
+
+    private var handReadablePreviewText: String {
+        let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = previewSourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty,
+              !source.hasPrefix(title),
+              title != source else {
+            return source
+        }
+        return "\(title)\n\(source)"
+    }
+
+    private var handURLHostText: String {
+        let raw = previewSourceText
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !raw.isEmpty else { return "Link" }
+        if let url = URL(string: raw),
+           let host = url.host,
+           !host.isEmpty {
+            return host
+        }
+        if let range = raw.range(of: #"(?i)(?:https?://)?([^/\s?#]+)"#, options: .regularExpression) {
+            let host = raw[range]
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+            if !host.isEmpty { return String(host) }
+        }
+        return "Link"
+    }
+
+    private var handPokerRank: String {
+        if item.pinned { return "PIN" }
+        switch item.kind {
+        case .text:     return "T"
+        case .image:    return "IMG"
+        case .url:      return "URL"
+        case .json:     return "{}"
+        case .xml:      return "XML"
+        case .yaml:     return "YML"
+        case .sql:      return "SQL"
+        case .markdown: return "MD"
+        case .code:     return "</>"
+        }
+    }
+
+    private var handFooterLeadingText: String {
+        if item.pinned {
+            return "Pinned"
+        }
+        if item.kind == .image {
+            return imageInfoParts(allowsExpensiveLoad: renderMode == .hydrated).dimensions
+        }
+        return sourceDisplayName
+    }
+
+    private var handFooterTrailingText: String {
+        if item.kind == .image {
+            return sourceDisplayName
+        }
+        return handCharacterCountText
     }
 
     private var footerText: String {
@@ -1141,6 +1921,276 @@ final class ClipCardView: NSView {
 }
 
 @MainActor
+private final class HandCardChromeView: NSView {
+    var isSelected = false { didSet { needsDisplay = true } }
+    var isHovering = false { didSet { needsDisplay = true } }
+    var glintPoint = CGPoint(x: 0.5, y: 0.18) { didSet { needsDisplay = true } }
+
+    private let accentColor: NSColor
+    private let radius: CGFloat
+    private let scale: CGFloat
+    private let theme: EasyPasteTheme
+
+    init(accentColor: NSColor, cornerRadius: CGFloat, scale: CGFloat, theme: EasyPasteTheme) {
+        self.accentColor = accentColor
+        self.radius = cornerRadius
+        self.scale = scale
+        self.theme = theme
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = cornerRadius
+        layer?.masksToBounds = true
+        layer?.backgroundColor = theme.handCardBase.cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+        theme.handCardBase.setFill()
+        path.fill()
+
+        NSGradient(colorsAndLocations:
+            (theme.handCardTop, 0.00),
+            (theme.handCardMiddle, 0.38),
+            (theme.handCardBottom, 1.00)
+        )?.draw(in: rect, angle: -90)
+
+        NSGradient(colorsAndLocations:
+            (theme.handHighlight.withAlphaComponent(isSelected ? theme.handHighlight.alphaComponent * 1.25 : theme.handHighlight.alphaComponent), 0.00),
+            (NSColor.clear, 0.30)
+        )?.draw(from: CGPoint(x: rect.minX, y: rect.maxY), to: CGPoint(x: rect.maxX * 0.62, y: rect.midY), options: [])
+
+        if isSelected || isHovering {
+            NSGradient(colorsAndLocations:
+                (accentColor.withAlphaComponent(isSelected ? 0.075 : 0.045), 0.00),
+                (NSColor.clear, 1.00)
+            )?.draw(
+                fromCenter: CGPoint(x: rect.midX, y: rect.minY + 34 * scale),
+                radius: 0,
+                toCenter: CGPoint(x: rect.midX, y: rect.minY + 34 * scale),
+                radius: 150 * scale,
+                options: []
+            )
+        }
+
+        NSGraphicsContext.restoreGraphicsState()
+
+        let borderColor: NSColor
+        if isSelected {
+            borderColor = theme.handSelectedBorder
+        } else if isHovering {
+            borderColor = theme.handHoverBorder
+        } else {
+            borderColor = theme.handQuietBorder
+        }
+        borderColor.setStroke()
+        path.lineWidth = isSelected ? 1.2 : 1
+        path.stroke()
+    }
+}
+
+private final class HandPokerCornerView: NSView {
+    private let label: String
+    private let accentColor: NSColor
+    private let scale: CGFloat
+
+    init(label: String, accentColor: NSColor, scale: CGFloat) {
+        self.label = label
+        self.accentColor = accentColor
+        self.scale = scale
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds
+        let textRect = NSRect(x: 0, y: rect.height - 22 * scale, width: rect.width, height: 22 * scale)
+        let fontSize = label.count > 2 ? 8.2 * scale : 10.5 * scale
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .bold),
+            .foregroundColor: accentColor.withAlphaComponent(0.90),
+            .kern: 0
+        ]
+        let attributed = NSAttributedString(string: label, attributes: attrs)
+        let textSize = attributed.size()
+        attributed.draw(
+            at: CGPoint(
+                x: textRect.midX - textSize.width / 2,
+                y: textRect.midY - textSize.height / 2
+            )
+        )
+
+        let pipRect = NSRect(
+            x: rect.midX - 3.2 * scale,
+            y: 4 * scale,
+            width: 6.4 * scale,
+            height: 6.4 * scale
+        )
+        let pipPath = NSBezierPath()
+        pipPath.move(to: CGPoint(x: pipRect.midX, y: pipRect.maxY))
+        pipPath.line(to: CGPoint(x: pipRect.maxX, y: pipRect.midY))
+        pipPath.line(to: CGPoint(x: pipRect.midX, y: pipRect.minY))
+        pipPath.line(to: CGPoint(x: pipRect.minX, y: pipRect.midY))
+        pipPath.close()
+        accentColor.withAlphaComponent(0.50).setFill()
+        pipPath.fill()
+    }
+}
+
+private final class HandGradientStripView: NSView {
+    private let accentColor: NSColor
+
+    init(accentColor: NSColor) {
+        self.accentColor = accentColor
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSGradient(colorsAndLocations:
+            (accentColor.withAlphaComponent(0.92), 0.00),
+            (NSColor.white.withAlphaComponent(0.22), 1.00)
+        )?.draw(in: bounds, angle: 0)
+    }
+}
+
+private final class HandBadgeView: NSView {
+    private let radius: CGFloat
+
+    init(cornerRadius: CGFloat) {
+        self.radius = cornerRadius
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+        NSGradient(colorsAndLocations:
+            (NSColor(calibratedRed: 0.100, green: 0.106, blue: 0.123, alpha: 1.0), 0.00),
+            (NSColor(calibratedRed: 0.052, green: 0.056, blue: 0.067, alpha: 1.0), 1.00)
+        )?.draw(in: rect, angle: -90)
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor(calibratedRed: 0.178, green: 0.188, blue: 0.212, alpha: 1.0).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+}
+
+private final class HandSelectionLineView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds
+        let radius = max(1, rect.height / 2)
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+        NSGradient(colorsAndLocations:
+            (NSColor.clear, 0.00),
+            (NSColor(calibratedRed: 0.85, green: 0.73, blue: 0.47, alpha: 1.00), 0.36),
+            (NSColor(calibratedRed: 0.47, green: 0.67, blue: 1.00, alpha: 1.00), 0.64),
+            (NSColor.clear, 1.00)
+        )?.draw(in: rect, angle: 0)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+private final class HandImagePreviewView: NSView {
+    let imageView = NSImageView()
+    private let accentColor: NSColor
+    private let metrics: CardMetrics
+    private let theme: EasyPasteTheme
+
+    init(image: NSImage?, placeholder: NSImage?, accentColor: NSColor, metrics: CardMetrics, theme: EasyPasteTheme) {
+        self.accentColor = accentColor
+        self.metrics = metrics
+        self.theme = theme
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
+
+        let frameView = NSView()
+        frameView.wantsLayer = true
+        frameView.layer?.cornerRadius = 8 * metrics.scale
+        frameView.layer?.borderWidth = 0.8
+        frameView.layer?.borderColor = theme.handQuietBorder.cgColor
+        frameView.layer?.backgroundColor = theme.handImageFrameBackground.cgColor
+        frameView.layer?.masksToBounds = true
+        frameView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(frameView)
+
+        imageView.image = image ?? placeholder
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.contentTintColor = theme.handMutedText
+        imageView.alphaValue = image == nil ? 0.62 : 1
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        frameView.addSubview(imageView)
+
+        NSLayoutConstraint.activate([
+            frameView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9 * metrics.scale),
+            frameView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9 * metrics.scale),
+            frameView.topAnchor.constraint(equalTo: topAnchor, constant: 9 * metrics.scale),
+            frameView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9 * metrics.scale),
+
+            imageView.leadingAnchor.constraint(equalTo: frameView.leadingAnchor, constant: 8 * metrics.scale),
+            imageView.trailingAnchor.constraint(equalTo: frameView.trailingAnchor, constant: -8 * metrics.scale),
+            imageView.topAnchor.constraint(equalTo: frameView.topAnchor, constant: 8 * metrics.scale),
+            imageView.bottomAnchor.constraint(equalTo: frameView.bottomAnchor, constant: -8 * metrics.scale)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let basePath = NSBezierPath(rect: bounds)
+        NSGraphicsContext.saveGraphicsState()
+        basePath.addClip()
+        theme.handImageStageBackground.setFill()
+        basePath.fill()
+        NSGradient(colorsAndLocations:
+            (accentColor.withAlphaComponent(0.08), 0.00),
+            (NSColor.clear, 0.62)
+        )?.draw(from: CGPoint(x: bounds.maxX, y: bounds.minY), to: CGPoint(x: bounds.minX, y: bounds.maxY), options: [])
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
 private final class BottomFadeView: NSView {
     private let color: NSColor
     private let metrics: CardMetrics
@@ -1545,6 +2595,33 @@ private extension NSImage {
         context.interpolationQuality = .high
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         return pixels
+    }
+}
+
+private extension NSBezierPath {
+    var cgPath: CGPath {
+        let path = CGMutablePath()
+        var points = [NSPoint](repeating: .zero, count: 3)
+        for index in 0..<elementCount {
+            let type = element(at: index, associatedPoints: &points)
+            switch type {
+            case .moveTo:
+                path.move(to: points[0])
+            case .lineTo:
+                path.addLine(to: points[0])
+            case .curveTo:
+                path.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .cubicCurveTo:
+                path.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .quadraticCurveTo:
+                path.addQuadCurve(to: points[1], control: points[0])
+            case .closePath:
+                path.closeSubpath()
+            @unknown default:
+                break
+            }
+        }
+        return path
     }
 }
 

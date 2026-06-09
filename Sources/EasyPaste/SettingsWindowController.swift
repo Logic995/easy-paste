@@ -3,6 +3,13 @@ import EasyPasteCore
 import ObjectiveC
 import UniformTypeIdentifiers
 
+private enum SettingsMetrics {
+    static let trailingControlWidth: CGFloat = 300
+    static let shortcutControlWidth: CGFloat = 150
+    static let sliderValueWidth: CGFloat = 62
+    static let sliderWidth: CGFloat = trailingControlWidth - sliderValueWidth - 10
+}
+
 @MainActor
 final class SettingsWindowController: NSWindowController {
     private enum Page: CaseIterable {
@@ -30,6 +37,7 @@ final class SettingsWindowController: NSWindowController {
 
     private let store: ClipboardStore
     private let onChange: (Bool) -> Void
+    private let onClearLocalData: () -> Void
     private var pendingPreferenceSaveTask: Task<Void, Never>?
     private var selectedPage: Page = .general
     private let rootView = NSView()
@@ -40,9 +48,14 @@ final class SettingsWindowController: NSWindowController {
     nonisolated(unsafe) private var hotKeyDiagnosticsObserver: NSObjectProtocol?
     nonisolated(unsafe) private var glassCapabilityObserver: NSObjectProtocol?
 
-    init(store: ClipboardStore, onChange: @escaping (Bool) -> Void) {
+    init(
+        store: ClipboardStore,
+        onChange: @escaping (Bool) -> Void,
+        onClearLocalData: @escaping () -> Void = {}
+    ) {
         self.store = store
         self.onChange = onChange
+        self.onClearLocalData = onClearLocalData
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
@@ -261,6 +274,15 @@ final class SettingsWindowController: NSWindowController {
                 self?.render()
                 self?.onChange(false)
             },
+            .segmentedRow(title: L10n.t("settings.quickPanelStyle"), labels: [
+                L10n.t("settings.quickPanelStyle.classic"),
+                L10n.t("settings.quickPanelStyle.cardHandExperimental")
+            ], selected: QuickPanelStyle.allCases.firstIndex(of: p.quickPanelStyle) ?? 0) { [weak self] index in
+                guard QuickPanelStyle.allCases.indices.contains(index) else { return }
+                self?.updatePrefs {
+                    $0.quickPanelStyle = QuickPanelStyle.allCases[index]
+                }
+            },
             .sliderRow(
                 title: L10n.t("settings.panelGlassOpacity"),
                 subtitle: L10n.t("settings.panelGlassOpacityHint"),
@@ -330,6 +352,10 @@ final class SettingsWindowController: NSWindowController {
         segmented.selectedSegment = selected
         segmented.segmentStyle = .rounded
         segmented.controlSize = .small
+        let segmentWidth = SettingsMetrics.trailingControlWidth / CGFloat(labels.count)
+        for index in labels.indices {
+            segmented.setWidth(segmentWidth, forSegment: index)
+        }
         segmented.translatesAutoresizingMaskIntoConstraints = false
         let segmentedRow = NSView()
         segmentedRow.translatesAutoresizingMaskIntoConstraints = false
@@ -378,6 +404,43 @@ final class SettingsWindowController: NSWindowController {
             subtitle: L10n.t("settings.ignoreApplicationsHint"),
             customView: ignoredAppsView()
         )
+
+        addSection(
+            to: stack,
+            title: L10n.t("settings.localData"),
+            subtitle: L10n.t("settings.localDataHint"),
+            customView: localDataView()
+        )
+    }
+
+    private func localDataView() -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: L10n.t("settings.clearLocalDataHint"))
+        label.font = .systemFont(ofSize: 12, weight: .regular)
+        label.textColor = EasyPasteThemeStore.effectiveTheme.secondaryText.withAlphaComponent(0.84)
+        label.maximumNumberOfLines = 2
+
+        let button = NSButton(title: L10n.t("settings.clearLocalData"), target: self, action: #selector(clearLocalData))
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.contentTintColor = .systemRed
+
+        [label, button].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            row.addSubview($0)
+        }
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 42),
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -16),
+            button.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            button.widthAnchor.constraint(equalToConstant: SettingsMetrics.trailingControlWidth)
+        ])
+        return row
     }
 
     private func ignoredAppsView() -> NSView {
@@ -453,7 +516,7 @@ final class SettingsWindowController: NSWindowController {
             row.heightAnchor.constraint(equalToConstant: 42),
             reset.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             reset.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            reset.widthAnchor.constraint(greaterThanOrEqualToConstant: 188)
+            reset.widthAnchor.constraint(equalToConstant: SettingsMetrics.trailingControlWidth)
         ])
         stack.addArrangedSubview(row)
     }
@@ -665,6 +728,10 @@ final class SettingsWindowController: NSWindowController {
             renderContent()
             onChange(true)
         }
+    }
+
+    @objc private func clearLocalData() {
+        onClearLocalData()
     }
 
     @objc private func addIgnoredApplication() {
@@ -883,6 +950,10 @@ private final class SegmentedRow: NSView {
         control.selectedSegment = selected
         control.segmentStyle = .rounded
         control.controlSize = .small
+        let segmentWidth = SettingsMetrics.trailingControlWidth / CGFloat(max(labels.count, 1))
+        for index in labels.indices {
+            control.setWidth(segmentWidth, forSegment: index)
+        }
         control.onAction { onChange(control.selectedSegment) }
         [titleLabel, control].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
@@ -894,7 +965,7 @@ private final class SegmentedRow: NSView {
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             control.trailingAnchor.constraint(equalTo: trailingAnchor),
             control.centerYAnchor.constraint(equalTo: centerYAnchor),
-            control.widthAnchor.constraint(equalToConstant: 196)
+            control.widthAnchor.constraint(equalToConstant: SettingsMetrics.trailingControlWidth)
         ])
     }
     @available(*, unavailable)
@@ -964,11 +1035,11 @@ private final class SliderRow: NSView {
 
             valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
             valueLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            valueLabel.widthAnchor.constraint(equalToConstant: 56),
+            valueLabel.widthAnchor.constraint(equalToConstant: SettingsMetrics.sliderValueWidth),
 
             slider.trailingAnchor.constraint(equalTo: valueLabel.leadingAnchor, constant: -10),
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
-            slider.widthAnchor.constraint(equalToConstant: 164)
+            slider.widthAnchor.constraint(equalToConstant: SettingsMetrics.sliderWidth)
         ])
     }
 
@@ -1086,7 +1157,7 @@ private final class ShortcutCaptureRow: NSView {
             subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 3),
             recorder.trailingAnchor.constraint(equalTo: trailingAnchor),
             recorder.centerYAnchor.constraint(equalTo: centerYAnchor),
-            recorder.widthAnchor.constraint(equalToConstant: 136),
+            recorder.widthAnchor.constraint(equalToConstant: SettingsMetrics.shortcutControlWidth),
             recorder.heightAnchor.constraint(equalToConstant: 26)
         ])
     }
@@ -1231,7 +1302,7 @@ private final class ShortcutRow: NSView {
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             key.trailingAnchor.constraint(equalTo: trailingAnchor),
             key.centerYAnchor.constraint(equalTo: centerYAnchor),
-            key.widthAnchor.constraint(greaterThanOrEqualToConstant: 124),
+            key.widthAnchor.constraint(equalToConstant: SettingsMetrics.shortcutControlWidth),
             key.heightAnchor.constraint(equalToConstant: 27)
         ])
     }

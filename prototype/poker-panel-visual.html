@@ -1,0 +1,1011 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Easy Paste — Free Card Hand Visual</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --ink: #f7f1e5;
+    --text: rgba(247, 241, 229, 0.94);
+    --text-soft: rgba(247, 241, 229, 0.66);
+    --text-muted: rgba(247, 241, 229, 0.42);
+    --gold: #d9ba77;
+    --blue: #78aaff;
+    --green: #78d6bc;
+    --rose: #e08daa;
+    --violet: #b7a7ff;
+    --card-w: 212px;
+    --card-h: 266px;
+    --radius: 14px;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    overflow: hidden;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    letter-spacing: 0;
+    background:
+      linear-gradient(130deg, rgba(120, 170, 255, 0.16), transparent 34%),
+      linear-gradient(245deg, rgba(120, 214, 188, 0.13), transparent 38%),
+      linear-gradient(180deg, #26282b 0%, #15181b 48%, #08090b 100%);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+    background-size: 42px 42px;
+    mask-image: linear-gradient(to bottom, transparent, black 18%, black 78%, transparent);
+  }
+
+  .desktop {
+    position: relative;
+    height: 100%;
+    padding: 34px 64px 28px;
+  }
+
+  .workspace {
+    position: absolute;
+    inset: 38px 64px 28px;
+    min-height: 360px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 14px;
+    background:
+      linear-gradient(180deg, rgba(43, 45, 50, 0.88), rgba(23, 25, 29, 0.84)),
+      rgba(18, 19, 22, 0.82);
+    box-shadow: 0 28px 90px rgba(0, 0, 0, 0.42);
+  }
+
+  .workspace::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 36%;
+    pointer-events: none;
+    background:
+      linear-gradient(180deg, transparent, rgba(4, 5, 7, 0.70)),
+      radial-gradient(ellipse at 50% 100%, rgba(217, 186, 119, 0.13), transparent 62%);
+  }
+
+  .window-bar {
+    height: 34px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.055);
+  }
+
+  .dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+  }
+
+  .dot.red { background: #ff5f57; }
+  .dot.yellow { background: #febc2e; }
+  .dot.green { background: #28c840; }
+
+  .window-title {
+    margin-left: 10px;
+    color: rgba(247, 241, 229, 0.48);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .editor {
+    display: grid;
+    grid-template-columns: 42px 1fr;
+    gap: 18px;
+    padding: 22px 24px;
+    color: rgba(247, 241, 229, 0.58);
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+
+  .line-numbers {
+    color: rgba(247, 241, 229, 0.22);
+    text-align: right;
+  }
+
+  .code span {
+    color: rgba(120, 170, 255, 0.88);
+  }
+
+  .code b {
+    color: rgba(120, 214, 188, 0.88);
+    font-weight: 500;
+  }
+
+  .free-card-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    pointer-events: none;
+  }
+
+  .free-card-layer::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: -110px;
+    width: min(980px, 86vw);
+    height: 270px;
+    border-radius: 50%;
+    background:
+      radial-gradient(ellipse at center, rgba(217, 186, 119, 0.26), rgba(120, 170, 255, 0.13) 36%, transparent 72%);
+    filter: blur(20px);
+    opacity: 0.95;
+    transform: translateX(-50%);
+  }
+
+  .free-card-layer::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 34%;
+    pointer-events: none;
+    background: linear-gradient(180deg, transparent, rgba(2, 3, 5, 0.42));
+  }
+
+  .card {
+    --x: 0px;
+    --y: 0px;
+    --rot: 0deg;
+    --scale: 1;
+    --glint-x: 50%;
+    --glint-y: 18%;
+    position: absolute;
+    left: 50%;
+    bottom: -96px;
+    z-index: var(--z, 1);
+    width: var(--card-w);
+    height: var(--card-h);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius);
+    color: var(--text);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.04) 34%, rgba(0, 0, 0, 0.18)),
+      rgba(19, 20, 24, 0.94);
+    box-shadow:
+      0 18px 34px rgba(0, 0, 0, 0.44),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    pointer-events: auto;
+    transform:
+      translateX(calc(-50% + var(--x)))
+      translateY(var(--y))
+      rotate(var(--rot))
+      scale(var(--scale));
+    transform-origin: 50% 115%;
+    will-change: transform;
+    transition:
+      transform 320ms cubic-bezier(0.19, 0.92, 0.25, 1),
+      border-color 220ms ease,
+      box-shadow 220ms ease,
+      filter 220ms ease;
+    animation: draw-card 640ms cubic-bezier(0.16, 1, 0.28, 1) both;
+    animation-delay: calc(var(--i, 0) * 42ms);
+  }
+
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background:
+      radial-gradient(circle at var(--glint-x) var(--glint-y), rgba(255, 255, 255, 0.20), transparent 24%),
+      linear-gradient(135deg, rgba(255, 255, 255, 0.24), transparent 28%),
+      linear-gradient(320deg, rgba(255, 255, 255, 0.06), transparent 44%);
+    opacity: 0.52;
+  }
+
+  .card::after {
+    content: "";
+    position: absolute;
+    left: 11%;
+    right: 11%;
+    bottom: -24px;
+    height: 30px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.54);
+    filter: blur(13px);
+    opacity: 0.74;
+    transform: scaleX(0.92);
+    pointer-events: none;
+  }
+
+  .card:hover {
+    --y: -92px;
+    --scale: 1.035;
+    z-index: 18;
+    filter: brightness(1.06);
+    border-color: rgba(255, 255, 255, 0.24);
+    box-shadow:
+      0 34px 72px rgba(0, 0, 0, 0.58),
+      0 0 30px rgba(120, 170, 255, 0.12),
+      inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  }
+
+  .card.selected {
+    --y: -146px;
+    --scale: 1.055;
+    z-index: 22;
+    border-color: rgba(217, 186, 119, 0.82);
+    box-shadow:
+      0 48px 98px rgba(0, 0, 0, 0.70),
+      0 0 0 1px rgba(255, 255, 255, 0.20),
+      0 0 42px rgba(120, 170, 255, 0.20),
+      0 0 34px rgba(217, 186, 119, 0.17),
+      inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  }
+
+  .card.selected::before {
+    opacity: 0.78;
+  }
+
+  .card.selected .selection-line {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+
+  .motion-ready .card {
+    animation: none;
+    transition:
+      border-color 220ms ease,
+      box-shadow 220ms ease,
+      filter 220ms ease;
+  }
+
+  .motion-ready .card.selected .card-inner {
+    animation: selected-breathe 3.4s ease-in-out infinite;
+  }
+
+  .card[data-type="text"] { --accent: var(--blue); }
+  .card[data-type="image"] { --accent: var(--green); }
+  .card[data-type="json"] { --accent: var(--gold); }
+  .card[data-type="url"] { --accent: var(--violet); }
+  .card[data-type="pinned"] { --accent: var(--rose); }
+
+  .card-inner {
+    position: relative;
+    z-index: 2;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: inherit;
+  }
+
+  .top-strip {
+    height: 4px;
+    background: linear-gradient(90deg, var(--accent), rgba(255, 255, 255, 0.22));
+    opacity: 0.92;
+  }
+
+  .card-head {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    padding: 13px 14px 10px;
+  }
+
+  .kind {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 820;
+    line-height: 1.1;
+  }
+
+  .meta {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-weight: 650;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .badge {
+    width: 33px;
+    height: 33px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 9px;
+    color: var(--accent);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.045));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13);
+  }
+
+  .badge svg {
+    width: 17px;
+    height: 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .card-body {
+    flex: 1;
+    min-height: 0;
+    padding: 0 14px 12px;
+  }
+
+  .preview {
+    height: 100%;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.058), rgba(0, 0, 0, 0.14)),
+      rgba(255, 255, 255, 0.035);
+  }
+
+  .text-preview {
+    padding: 12px;
+    color: rgba(247, 241, 229, 0.80);
+    font-size: 12px;
+    line-height: 1.55;
+    word-break: break-word;
+  }
+
+  .code-preview {
+    padding: 11px 12px;
+    color: rgba(247, 241, 229, 0.76);
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 10.8px;
+    line-height: 1.56;
+    white-space: pre-wrap;
+  }
+
+  .code-preview em {
+    color: var(--accent);
+    font-style: normal;
+  }
+
+  .image-preview {
+    position: relative;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    background:
+      linear-gradient(135deg, rgba(120, 214, 188, 0.25), transparent 42%),
+      linear-gradient(315deg, rgba(120, 170, 255, 0.18), transparent 45%),
+      repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.07) 0 8px, rgba(255, 255, 255, 0.025) 8px 16px);
+  }
+
+  .image-frame {
+    width: 72%;
+    aspect-ratio: 1.5;
+    border: 1px solid rgba(255, 255, 255, 0.20);
+    border-radius: 8px;
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.04)),
+      rgba(7, 8, 10, 0.22);
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.24);
+  }
+
+  .url-preview {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    height: 100%;
+  }
+
+  .url-bar {
+    height: 30px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .url-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: rgba(247, 241, 229, 0.32);
+  }
+
+  .url-copy {
+    padding: 12px;
+    color: rgba(247, 241, 229, 0.78);
+    font-size: 11.5px;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+
+  .card-foot {
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 14px 12px;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-weight: 650;
+  }
+
+  .source {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: rgba(247, 241, 229, 0.72);
+  }
+
+  .mark svg {
+    width: 12px;
+    height: 12px;
+    fill: var(--gold);
+  }
+
+  .selection-line {
+    position: absolute;
+    left: 17px;
+    right: 17px;
+    bottom: 9px;
+    height: 2px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, transparent, var(--gold), var(--blue), transparent);
+    opacity: 0;
+    transform: scaleX(0.62);
+    transition: opacity 220ms ease, transform 260ms ease;
+  }
+
+  .card:nth-child(1) { --x: 0px; --rot: 0deg; --y: -146px; --scale: 1.055; --z: 12; }
+  .card:nth-child(2) { --x: 150px; --rot: 5deg; --y: -42px; --z: 6; }
+  .card:nth-child(3) { --x: 304px; --rot: 11deg; --y: -6px; --z: 3; }
+  .card:nth-child(4) { --x: 462px; --rot: 17deg; --y: 34px; --z: 1; }
+  .card:nth-child(5) { --x: -462px; --rot: -17deg; --y: 34px; --z: 1; }
+  .card:nth-child(6) { --x: -304px; --rot: -11deg; --y: -6px; --z: 3; }
+  .card:nth-child(7) { --x: -150px; --rot: -5deg; --y: -42px; --z: 6; }
+
+  @keyframes draw-card {
+    from {
+      opacity: 0;
+      transform:
+        translateX(calc(-50% + var(--x)))
+        translateY(150px)
+        rotate(calc(var(--rot) - 8deg))
+        scale(0.94);
+    }
+    to {
+      opacity: 1;
+      transform:
+        translateX(calc(-50% + var(--x)))
+        translateY(var(--y))
+        rotate(var(--rot))
+        scale(var(--scale));
+    }
+  }
+
+  @keyframes selected-breathe {
+    0%,
+    100% {
+      filter: saturate(1);
+    }
+    50% {
+      filter: saturate(1.08) brightness(1.035);
+    }
+  }
+
+  @media (max-width: 980px) {
+    :root {
+      --card-w: 176px;
+      --card-h: 236px;
+    }
+
+    .desktop {
+      padding-inline: 22px;
+    }
+
+    .workspace {
+      inset: 28px 22px 24px;
+    }
+
+    .card:nth-child(1) { --x: 0px; --rot: 0deg; }
+    .card:nth-child(2) { --x: 116px; --rot: 5deg; }
+    .card:nth-child(3) { --x: 230px; --rot: 10deg; }
+    .card:nth-child(4) { --x: 344px; --rot: 15deg; }
+    .card:nth-child(5) { --x: -344px; --rot: -15deg; }
+    .card:nth-child(6) { --x: -230px; --rot: -10deg; }
+    .card:nth-child(7) { --x: -116px; --rot: -5deg; }
+
+    .card.selected {
+      --y: -126px;
+    }
+  }
+
+  @media (max-width: 560px) {
+    :root {
+      --card-w: 154px;
+      --card-h: 214px;
+    }
+
+    body {
+      overflow-x: hidden;
+    }
+
+    .desktop {
+      padding-inline: 10px;
+    }
+
+    .workspace {
+      inset: 18px 10px 16px;
+      border-radius: 12px;
+    }
+
+    .editor {
+      grid-template-columns: 26px 1fr;
+      gap: 10px;
+      padding: 16px 14px;
+      font-size: 11px;
+    }
+
+    .card {
+      bottom: -90px;
+    }
+
+    .card:nth-child(1) { --x: 0px; --rot: 0deg; }
+    .card:nth-child(2) { --x: 88px; --rot: 4deg; }
+    .card:nth-child(3) { --x: 178px; --rot: 9deg; }
+    .card:nth-child(4) { --x: 268px; --rot: 14deg; }
+    .card:nth-child(5) { --x: -268px; --rot: -14deg; }
+    .card:nth-child(6) { --x: -178px; --rot: -9deg; }
+    .card:nth-child(7) { --x: -88px; --rot: -4deg; }
+
+    .card.selected {
+      --y: -108px;
+      --scale: 1.035;
+    }
+
+    .card:hover {
+      --y: -76px;
+    }
+
+    .card-head {
+      padding-inline: 12px;
+    }
+
+    .card-body {
+      padding-inline: 12px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 1ms !important;
+    }
+
+    .card,
+    .card:hover,
+    .card.selected {
+      transform:
+        translateX(calc(-50% + var(--x)))
+        translateY(var(--y))
+        rotate(var(--rot))
+        scale(var(--scale));
+    }
+  }
+</style>
+</head>
+<body>
+  <main class="desktop">
+    <section class="workspace" aria-label="Desktop window preview">
+      <div class="window-bar">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+        <span class="window-title">Code — EasyPaste</span>
+      </div>
+      <div class="editor" aria-hidden="true">
+        <div class="line-numbers">12<br />13<br />14<br />15<br />16<br />17<br />18<br />19</div>
+        <div class="code">
+          <span>let</span> recent = store.items(in: .all)<br />
+          <span>let</span> selected = recent.pinned.first ?? recent.first<br /><br />
+          <b>cards.float</b>(from: .bottomEdge, over: activeWindow)<br />
+          <span>if</span> event.keyCode == .return {<br />
+          &nbsp;&nbsp;<b>paste</b>(selected)<br />
+          }
+        </div>
+      </div>
+    </section>
+
+    <section class="free-card-layer" aria-label="Easy Paste free floating card hand">
+      <article class="card selected" data-type="image" style="--i: 0">
+        <div class="card-inner">
+          <div class="top-strip"></div>
+          <header class="card-head">
+            <div>
+              <div class="kind">Image</div>
+              <div class="meta">5 hours ago · Preview</div>
+            </div>
+            <div class="badge"><svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5v-11Z"/><path d="m6.5 17 4.1-4.1 2.4 2.4 2-2L19 17"/><path d="M15.5 8.5h.01"/></svg></div>
+          </header>
+          <div class="card-body">
+            <div class="preview image-preview"><div class="image-frame"></div></div>
+          </div>
+          <footer class="card-foot"><span class="source">2069 x 521</span><span>Safari</span></footer>
+          <div class="selection-line"></div>
+        </div>
+      </article>
+
+      <article class="card" data-type="text" style="--i: 1">
+        <div class="card-inner">
+          <div class="top-strip"></div>
+          <header class="card-head">
+            <div>
+              <div class="kind">Text</div>
+              <div class="meta">6 hours ago · Note</div>
+            </div>
+            <div class="badge"><svg viewBox="0 0 24 24"><path d="M5 6h14"/><path d="M5 12h10"/><path d="M5 18h7"/></svg></div>
+          </header>
+          <div class="card-body">
+            <div class="preview text-preview">swift run EasyPaste<br /><br />没有面板，卡片直接覆盖在当前窗口底部。</div>
+          </div>
+          <footer class="card-foot"><span class="source">Terminal</span><span>92 chars</span></footer>
+          <div class="selection-line"></div>
+        </div>
+      </article>
+
+      <article class="card" data-type="json" style="--i: 2">
+        <div class="card-inner">
+          <div class="top-strip"></div>
+          <header class="card-head">
+            <div>
+              <div class="kind">JSON</div>
+              <div class="meta">Today · Config</div>
+            </div>
+            <div class="badge"><svg viewBox="0 0 24 24"><path d="M8 7 4 12l4 5"/><path d="m16 7 4 5-4 5"/><path d="m13 5-2 14"/></svg></div>
+          </header>
+          <div class="card-body">
+            <div class="preview code-preview">{<br />  <em>"name"</em>: "Easy Paste",<br />  <em>"mode"</em>: "floating-hand",<br />  <em>"container"</em>: "none"<br />}</div>
+          </div>
+          <footer class="card-foot"><span class="source">Code</span><span>128 chars</span></footer>
+          <div class="selection-line"></div>
+        </div>
+      </article>
+
+      <article class="card" data-type="pinned" style="--i: 3">
+        <div class="card-inner">
+          <div class="top-strip"></div>
+          <header class="card-head">
+            <div>
+              <div class="kind">Pinned Text</div>
+              <div class="meta">2 minutes ago · Selected</div>
+            </div>
+            <div class="badge"><svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9L7.5 14 3 9.6l6.2-.9L12 3Z"/></svg></div>
+          </header>
+          <div class="card-body">
+            <div class="preview text-preview">这张牌像被手从屏幕底部抽出来，所有卡片都脱离容器，只靠空间、阴影和层级组织。</div>
+          </div>
+          <footer class="card-foot"><span class="mark"><svg viewBox="0 0 16 16"><path d="m8 1.5 1.9 3.9 4.3.6-3.1 3 .8 4.3L8 11.3l-3.9 2 .8-4.3-3.1-3 4.3-.6L8 1.5Z"/></svg>Pinned</span><span>Cursor</span></footer>
+          <div class="selection-line"></div>
+        </div>
+      </article>
+
+      <article class="card" data-type="url" style="--i: 4">
+        <div class="card-inner">
+          <div class="top-strip"></div>
+          <header class="card-head">
+            <div>
+              <div class="kind">URL</div>
+              <div class="meta">Yesterday · Link</div>
+            </div>
+            <div class="badge"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/></svg></div>
+          </header>
+          <div class="card-body">
+            <div class="preview url-preview">
+              <div class="url-bar"><span class="url-dot"></span><span class="url-dot"></span><span class="url-dot"></span></div>
+              <div class="url-copy">https://pasteapp.io/help/keyboard-shortcuts</div>
+            </div>
+          </div>
+          <footer class="card-foot"><span class="source">Safari</span><span>43 chars</span></footer>
+          <div class="selection-line"></div>
+        </div>
+      </article>
+
+      <article class="card" data-type="json" style="--i: 5">
+        <div class="card-inner">
+          <div class="top-strip"></div>
+          <header class="card-head">
+            <div>
+              <div class="kind">Code</div>
+              <div class="meta">Yesterday · Swift</div>
+            </div>
+            <div class="badge"><svg viewBox="0 0 24 24"><path d="M8 9 4 12l4 3"/><path d="m16 9 4 3-4 3"/><path d="m14 5-4 14"/></svg></div>
+          </header>
+          <div class="card-body">
+            <div class="preview code-preview"><em>private func</em> floatCards() {<br />  card.anchor = bottomEdge<br />  card.container = nil<br />}</div>
+          </div>
+          <footer class="card-foot"><span class="source">Xcode</span><span>86 chars</span></footer>
+          <div class="selection-line"></div>
+        </div>
+      </article>
+
+      <article class="card" data-type="text" style="--i: 6">
+        <div class="card-inner">
+          <div class="top-strip"></div>
+          <header class="card-head">
+            <div>
+              <div class="kind">Markdown</div>
+              <div class="meta">3 days ago · README</div>
+            </div>
+            <div class="badge"><svg viewBox="0 0 24 24"><path d="M5 7v10"/><path d="M9 17V7l3 5 3-5v10"/><path d="M19 7v10"/></svg></div>
+          </header>
+          <div class="card-body">
+            <div class="preview text-preview"># Easy Paste<br /><br />- Search<br />- Format paste<br />- Pinboards</div>
+          </div>
+          <footer class="card-foot"><span class="source">Code</span><span>52 chars</span></footer>
+          <div class="selection-line"></div>
+        </div>
+      </article>
+    </section>
+  </main>
+<script>
+(() => {
+  const cards = Array.from(document.querySelectorAll(".card"));
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let activeIndex = Math.max(0, cards.findIndex((card) => card.classList.contains("selected")));
+  let hoveredIndex = -1;
+  let lastTime = performance.now();
+  const pointer = {
+    x: window.innerWidth / 2,
+    y: window.innerHeight,
+    active: false
+  };
+
+  const state = cards.map(() => ({
+    x: 0,
+    y: 160,
+    r: 0,
+    s: 0.94,
+    vx: 0,
+    vy: 0,
+    vr: 0,
+    vs: 0
+  }));
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function wrapIndex(index) {
+    return (index + cards.length) % cards.length;
+  }
+
+  function circularDelta(index) {
+    let delta = index - activeIndex;
+    const half = cards.length / 2;
+    if (delta > half) delta -= cards.length;
+    if (delta < -half) delta += cards.length;
+    return delta;
+  }
+
+  function layoutMetrics() {
+    const width = window.innerWidth;
+    const cardWidth = cards[0]?.offsetWidth || 212;
+    const spread = clamp(width * 0.105, cardWidth * 0.58, cardWidth * 0.74);
+    return { width, cardWidth, spread };
+  }
+
+  function basePose(index, now) {
+    const { width, cardWidth, spread } = layoutMetrics();
+    const delta = circularDelta(index);
+    const abs = Math.abs(delta);
+    const sign = Math.sign(delta);
+    const fanX = sign * Math.pow(abs, 1.10) * spread;
+    const naturalCurve = Math.pow(abs, 1.45) * 20 - 48;
+    const idle = reduceMotion ? 0 : Math.sin(now * 0.0015 + index * 0.82) * 1.4;
+    let x = fanX;
+    let y = naturalCurve + idle;
+    let r = delta * 5.4;
+    let s = 0.992 - abs * 0.006;
+
+    if (index === activeIndex) {
+      y = -148 + idle * 0.35;
+      r *= 0.16;
+      s = width < 560 ? 1.035 : 1.058;
+    } else if (abs <= 2) {
+      const give = 3 - abs;
+      x += sign * give * 16;
+      y -= give * 10;
+      r += sign * give * 1.2;
+    }
+
+    if (pointer.active) {
+      const cardCenterX = width / 2 + x;
+      const dx = pointer.x - cardCenterX;
+      const proximity = clamp(1 - Math.abs(dx) / (cardWidth * 1.45), 0, 1);
+      const lowerZone = clamp((pointer.y - window.innerHeight * 0.46) / (window.innerHeight * 0.46), 0, 1);
+      const pull = proximity * lowerZone;
+
+      if (index !== activeIndex) {
+        y -= pull * 42;
+        s += pull * 0.022;
+      } else {
+        y -= pull * 10;
+      }
+      x -= dx * pull * 0.032;
+      r += clamp(dx / cardWidth, -1, 1) * pull * 4.2;
+    }
+
+    if (index === hoveredIndex && index !== activeIndex) {
+      y -= 34;
+      s += 0.018;
+    }
+
+    return { x, y, r, s };
+  }
+
+  function setPose(card, pose) {
+    card.style.setProperty("--x", `${pose.x.toFixed(2)}px`);
+    card.style.setProperty("--y", `${pose.y.toFixed(2)}px`);
+    card.style.setProperty("--rot", `${pose.r.toFixed(2)}deg`);
+    card.style.setProperty("--scale", pose.s.toFixed(4));
+  }
+
+  function spring(current, velocity, target, dt, stiffness, damping) {
+    const force = (target - current) * stiffness;
+    const nextVelocity = (velocity + force * dt) * Math.exp(-damping * dt);
+    return {
+      value: current + nextVelocity * dt,
+      velocity: nextVelocity
+    };
+  }
+
+  function updateSelection(nextIndex) {
+    activeIndex = nextIndex;
+    cards.forEach((card, index) => {
+      card.classList.toggle("selected", index === activeIndex);
+      card.setAttribute("aria-selected", index === activeIndex ? "true" : "false");
+    });
+  }
+
+  function animate(now) {
+    const dt = Math.min(0.034, (now - lastTime) / 1000 || 0.016);
+    lastTime = now;
+
+    cards.forEach((card, index) => {
+      const target = basePose(index, now);
+      const item = state[index];
+      const stiff = index === activeIndex ? 190 : 155;
+      const damp = index === activeIndex ? 22 : 19;
+
+      const sx = spring(item.x, item.vx, target.x, dt, stiff, damp);
+      const sy = spring(item.y, item.vy, target.y, dt, stiff, damp);
+      const sr = spring(item.r, item.vr, target.r, dt, 130, 18);
+      const ss = spring(item.s, item.vs, target.s, dt, 150, 20);
+
+      item.x = sx.value;
+      item.y = sy.value;
+      item.r = sr.value;
+      item.s = ss.value;
+      item.vx = sx.velocity;
+      item.vy = sy.velocity;
+      item.vr = sr.velocity;
+      item.vs = ss.velocity;
+
+      setPose(card, item);
+      card.style.zIndex = index === activeIndex
+        ? "30"
+        : String(18 - Math.abs(circularDelta(index)) * 2 + (index === hoveredIndex ? 5 : 0));
+    });
+
+    requestAnimationFrame(animate);
+  }
+
+  function setGlint(event, card) {
+    const rect = card.getBoundingClientRect();
+    const x = clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100);
+    const y = clamp(((event.clientY - rect.top) / rect.height) * 100, 0, 100);
+    card.style.setProperty("--glint-x", `${x.toFixed(1)}%`);
+    card.style.setProperty("--glint-y", `${y.toFixed(1)}%`);
+  }
+
+  cards.forEach((card, index) => {
+    card.setAttribute("tabindex", "0");
+    card.addEventListener("pointerenter", () => {
+      hoveredIndex = index;
+    });
+    card.addEventListener("pointermove", (event) => setGlint(event, card));
+    card.addEventListener("pointerleave", () => {
+      if (hoveredIndex === index) hoveredIndex = -1;
+      card.style.setProperty("--glint-x", "50%");
+      card.style.setProperty("--glint-y", "18%");
+    });
+    card.addEventListener("click", () => updateSelection(index));
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        updateSelection(index);
+      }
+    });
+  });
+
+  window.addEventListener("pointermove", (event) => {
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+    pointer.active = true;
+  });
+
+  window.addEventListener("pointerleave", () => {
+    pointer.active = false;
+    hoveredIndex = -1;
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowLeft") {
+      updateSelection(wrapIndex(activeIndex - 1));
+    }
+    if (event.key === "ArrowRight") {
+      updateSelection(wrapIndex(activeIndex + 1));
+    }
+  });
+
+  function initialize() {
+    cards.forEach((card, index) => {
+      const target = basePose(index, performance.now());
+      state[index].x = target.x;
+      state[index].y = target.y + 170;
+      state[index].r = target.r - 8;
+      state[index].s = 0.94;
+      setPose(card, state[index]);
+    });
+    document.body.classList.add("motion-ready");
+    updateSelection(activeIndex);
+    if (reduceMotion) {
+      cards.forEach((card, index) => setPose(card, basePose(index, performance.now())));
+      return;
+    }
+    requestAnimationFrame(animate);
+  }
+
+  initialize();
+})();
+</script>
+</body>
+</html>
