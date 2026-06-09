@@ -28,6 +28,7 @@ private func prefItem(_ title: String, updatedAt: Date, pinned: Bool = false) ->
     #expect(store.preferences.pasteDestination == .activeApp)
     try store.updatePreferences {
         $0.pasteDestination = .clipboard
+        $0.quickPanelStyle = .cardHandExperimental
         $0.alwaysPastePlainText = true
         $0.activationShortcut = KeyboardShortcut(keyCode: 8, carbonModifiers: 768)
     }
@@ -35,6 +36,7 @@ private func prefItem(_ title: String, updatedAt: Date, pinned: Bool = false) ->
     let reloaded = ClipboardStore(fileURL: store.fileURL)
     try reloaded.load()
     #expect(reloaded.preferences.pasteDestination == .clipboard)
+    #expect(reloaded.preferences.quickPanelStyle == .cardHandExperimental)
     #expect(reloaded.preferences.alwaysPastePlainText)
     #expect(reloaded.preferences.activationShortcut == KeyboardShortcut(keyCode: 8, carbonModifiers: 768))
 }
@@ -61,6 +63,7 @@ private func prefItem(_ title: String, updatedAt: Date, pinned: Bool = false) ->
 
     try store.load()
     #expect(store.preferences.activationShortcut == .defaultActivation)
+    #expect(store.preferences.quickPanelStyle == .classic)
 }
 
 @Test @MainActor func historyRetentionRemovesExpiredDisposableItems() throws {
@@ -91,6 +94,7 @@ private func prefItem(_ title: String, updatedAt: Date, pinned: Bool = false) ->
 
 @Test func contentPrivacyFiltersDefaultOffBecauseIgnoredAppsAreTheBoundary() {
     let preferences = EasyPastePreferences()
+    #expect(preferences.quickPanelStyle == .classic)
     #expect(!preferences.debugPerformance)
     #expect(preferences.panelGlassOpacity == 1.0)
     #expect(!preferences.ignoreConfidentialContent)

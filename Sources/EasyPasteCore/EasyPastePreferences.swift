@@ -5,6 +5,11 @@ public enum PasteDestination: String, Codable, Equatable, CaseIterable, Sendable
     case clipboard
 }
 
+public enum QuickPanelStyle: String, Codable, Equatable, CaseIterable, Sendable {
+    case classic
+    case cardHandExperimental
+}
+
 public enum HistoryRetention: String, Codable, Equatable, CaseIterable, Sendable {
     case day
     case week
@@ -58,6 +63,7 @@ public struct EasyPastePreferences: Codable, Equatable, Sendable {
     public var soundEffects: Bool
     public var activationShortcut: KeyboardShortcut
     public var pasteDestination: PasteDestination
+    public var quickPanelStyle: QuickPanelStyle
     public var alwaysPastePlainText: Bool
     public var historyRetention: HistoryRetention
     public var showDuringScreenSharing: Bool
@@ -74,6 +80,7 @@ public struct EasyPastePreferences: Codable, Equatable, Sendable {
         soundEffects: Bool = false,
         activationShortcut: KeyboardShortcut = .defaultActivation,
         pasteDestination: PasteDestination = .activeApp,
+        quickPanelStyle: QuickPanelStyle = .classic,
         alwaysPastePlainText: Bool = false,
         historyRetention: HistoryRetention = .forever,
         showDuringScreenSharing: Bool = true,
@@ -89,6 +96,7 @@ public struct EasyPastePreferences: Codable, Equatable, Sendable {
         self.soundEffects = soundEffects
         self.activationShortcut = activationShortcut
         self.pasteDestination = pasteDestination
+        self.quickPanelStyle = quickPanelStyle
         self.alwaysPastePlainText = alwaysPastePlainText
         self.historyRetention = historyRetention
         self.showDuringScreenSharing = showDuringScreenSharing
@@ -106,6 +114,7 @@ public struct EasyPastePreferences: Codable, Equatable, Sendable {
         case soundEffects
         case activationShortcut
         case pasteDestination
+        case quickPanelStyle
         case alwaysPastePlainText
         case historyRetention
         case showDuringScreenSharing
@@ -124,6 +133,7 @@ public struct EasyPastePreferences: Codable, Equatable, Sendable {
         soundEffects = try c.decodeIfPresent(Bool.self, forKey: .soundEffects) ?? false
         activationShortcut = try c.decodeIfPresent(KeyboardShortcut.self, forKey: .activationShortcut) ?? .defaultActivation
         pasteDestination = try c.decodeIfPresent(PasteDestination.self, forKey: .pasteDestination) ?? .activeApp
+        quickPanelStyle = try c.decodeIfPresent(QuickPanelStyle.self, forKey: .quickPanelStyle) ?? .classic
         alwaysPastePlainText = try c.decodeIfPresent(Bool.self, forKey: .alwaysPastePlainText) ?? false
         historyRetention = try c.decodeIfPresent(HistoryRetention.self, forKey: .historyRetention) ?? .forever
         showDuringScreenSharing = try c.decodeIfPresent(Bool.self, forKey: .showDuringScreenSharing) ?? true

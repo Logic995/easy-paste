@@ -4,7 +4,7 @@ import ObjectiveC
 import UniformTypeIdentifiers
 
 private enum SettingsMetrics {
-    static let trailingControlWidth: CGFloat = 212
+    static let trailingControlWidth: CGFloat = 300
     static let shortcutControlWidth: CGFloat = 150
     static let sliderValueWidth: CGFloat = 62
     static let sliderWidth: CGFloat = trailingControlWidth - sliderValueWidth - 10
@@ -273,6 +273,15 @@ final class SettingsWindowController: NSWindowController {
                 EasyPasteThemeStore.mode = EasyPasteThemeMode.allCases[index]
                 self?.render()
                 self?.onChange(false)
+            },
+            .segmentedRow(title: L10n.t("settings.quickPanelStyle"), labels: [
+                L10n.t("settings.quickPanelStyle.classic"),
+                L10n.t("settings.quickPanelStyle.cardHandExperimental")
+            ], selected: QuickPanelStyle.allCases.firstIndex(of: p.quickPanelStyle) ?? 0) { [weak self] index in
+                guard QuickPanelStyle.allCases.indices.contains(index) else { return }
+                self?.updatePrefs {
+                    $0.quickPanelStyle = QuickPanelStyle.allCases[index]
+                }
             },
             .sliderRow(
                 title: L10n.t("settings.panelGlassOpacity"),

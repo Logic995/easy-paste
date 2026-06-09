@@ -57,6 +57,34 @@ private struct CardRenderSignature: Equatable {
     var itemKeys: [String]
 }
 
+private struct HandCardSlot {
+    var offset: Int
+    var x: CGFloat
+    var liftFromBase: CGFloat
+    var rotationDegrees: CGFloat
+    var scale: CGFloat
+    var zPosition: CGFloat
+}
+
+private struct HandBasePose {
+    var x: CGFloat
+    var y: CGFloat
+    var rotationDegrees: CGFloat
+    var scale: CGFloat
+}
+
+private struct HandLayoutProfile {
+    var spreadScale: CGFloat
+    var curveScale: CGFloat
+    var rotationScale: CGFloat
+    var selectedLift: CGFloat
+    var selectedScaleBoost: CGFloat
+    var neighborNudgeX: CGFloat
+    var neighborNudgeY: CGFloat
+    var stageHeightRatio: CGFloat
+    var topPadding: CGFloat
+}
+
 /// 根据屏幕高度计算 scale；裁到 [0.85, 1.30]，保证 13" 不太挤、27" 不太空。
 @MainActor
 func computeUIScale(for screen: NSScreen?) -> CGFloat {
@@ -116,7 +144,21 @@ final class PanelController: NSObject {
     private let scrollView = NSScrollView()
     private let documentView = NSView()
     private let cardStack = NSStackView()
+    private let handBackdropView = HandPanelBackdropView()
+    private let handCardLayer = HandCardLayerView()
+    private weak var toolbarView: NSView?
     private weak var emptyView: NSView?
+
+    private var usesCardHandStyle: Bool {
+        store.preferences.quickPanelStyle == .cardHandExperimental
+    }
+
+    private let handSideSlotCount = 3
+    private var handCardOrder: [UUID] = []
+    private var handMotionTimer: Timer?
+    private var handIncomingCardIDs: Set<UUID> = []
+    private var handExitingCardIDs: Set<UUID> = []
+    private var needsHandDealAnimation = false
 
     init(
         store: ClipboardStore,
@@ -235,7 +277,23 @@ final class PanelController: NSObject {
         }
         self.targetApplication = targetApplication
         selectedItemID = nil
+        if usesCardHandStyle {
+            handIncomingCardIDs.removeAll()
+            handExitingCardIDs.removeAll()
+            needsHandDealAnimation = false
+        } else {
+            needsHandDealAnimation = false
+        }
         applyTheme()
+        let handStyle = usesCardHandStyle
+        if handStyle {
+            let syncStart = EasyPasteDiagnostics.now()
+            let captured = clipboardController.syncNow()
+            EasyPasteDiagnostics.log("panel.show.preSync", [
+                "captured": "\(captured)",
+                "ms": EasyPasteDiagnostics.elapsedMS(since: syncStart)
+            ])
+        }
         startPanelKeyMonitoring()
         startModifierMonitoring()
         startDismissMonitoring()
@@ -252,6 +310,7 @@ final class PanelController: NSObject {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 35_000_000)
             guard let self, self.window.isVisible else { return }
+            guard !handStyle else { return }
             let syncStart = EasyPasteDiagnostics.now()
             let captured = self.clipboardController.syncNow()
             EasyPasteDiagnostics.log("panel.show.postSync", [
@@ -268,13 +327,52 @@ final class PanelController: NSObject {
     private func showAnimated() {
         ignoreResignKeyUntil = Date().addingTimeInterval(0.45)
         acceptedKeySinceShow = false
+        let handStyle = usesCardHandStyle
+        if handStyle {
+            let initialOffset: CGFloat = -18 * PanelLayout.current.scale
+            rootView.wantsLayer = true
+            if let layer = rootView.layer {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                layer.opacity = 0
+                layer.setAffineTransform(CGAffineTransform(translationX: 0, y: initialOffset))
+                CATransaction.commit()
+            }
+
+            positionWindow()
+            window.contentView?.layoutSubtreeIfNeeded()
+            updateCardPresentation()
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            window.contentView?.layoutSubtreeIfNeeded()
+            updateHandCardPresentation(immediate: true)
+            acceptedKeySinceShow = false
+            stopHandMotionTimer()
+
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self,
+                      self.window.isVisible,
+                      self.usesCardHandStyle else {
+                    return
+                }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self.window.contentView?.layoutSubtreeIfNeeded()
+                self.updateHandCardPresentation(immediate: true)
+                CATransaction.commit()
+                self.startHandShowAnimation(initialOffset: initialOffset)
+            }
+            return
+        }
+        let initialOffset: CGFloat = handStyle ? -74 * PanelLayout.current.scale : -18
         // 1. window 立刻就位，但先让 rootView 透明 + 下沉，避免肉眼看到突兀的 frame jump
         rootView.wantsLayer = true
         if let layer = rootView.layer {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             layer.opacity = 0
-            layer.setAffineTransform(CGAffineTransform(translationX: 0, y: -18))
+            layer.setAffineTransform(CGAffineTransform(translationX: 0, y: initialOffset))
             CATransaction.commit()
         }
         window.makeKeyAndOrderFront(nil)
@@ -286,11 +384,11 @@ final class PanelController: NSObject {
         if let layer = rootView.layer {
             let timing = CAMediaTimingFunction(controlPoints: 0.20, 0.90, 0.30, 1.00) // easeOutQuart 风格
             CATransaction.begin()
-            CATransaction.setAnimationDuration(0.22)
+            CATransaction.setAnimationDuration(handStyle ? 0.36 : 0.22)
             CATransaction.setAnimationTimingFunction(timing)
 
             let translate = CABasicAnimation(keyPath: "transform")
-            translate.fromValue = CATransform3DMakeTranslation(0, -18, 0)
+            translate.fromValue = CATransform3DMakeTranslation(0, initialOffset, 0)
             translate.toValue = CATransform3DIdentity
             layer.add(translate, forKey: "showSlide")
             layer.transform = CATransform3DIdentity
@@ -303,23 +401,63 @@ final class PanelController: NSObject {
 
             CATransaction.commit()
         }
+        if usesCardHandStyle {
+            updateCardPresentation()
+        }
+    }
+
+    private func startHandShowAnimation(initialOffset: CGFloat) {
+        guard let layer = rootView.layer else {
+            rootView.alphaValue = 1
+            return
+        }
+        layer.removeAnimation(forKey: "handShowSlide")
+        layer.removeAnimation(forKey: "handShowFade")
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.opacity = 0
+        layer.setAffineTransform(CGAffineTransform(translationX: 0, y: initialOffset))
+        CATransaction.commit()
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.24)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.18, 0.82, 0.18, 1.00))
+
+        let translate = CABasicAnimation(keyPath: "transform")
+        translate.fromValue = CATransform3DMakeTranslation(0, initialOffset, 0)
+        translate.toValue = CATransform3DIdentity
+        layer.add(translate, forKey: "handShowSlide")
+        layer.transform = CATransform3DIdentity
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        layer.add(fade, forKey: "handShowFade")
+        layer.opacity = 1
+
+        CATransaction.commit()
     }
 
     /// 反向：rootView 下滑 + 淡出后再 orderOut。
     func hideAnimated() {
         guard window.isVisible else { return }
         guard let layer = rootView.layer else {
+            stopHandMotionTimer()
             resetSearchStateForNextShow()
             window.orderOut(nil)
             return
         }
 
+        let handStyle = usesCardHandStyle
+        let hideOffset: CGFloat = handStyle ? -82 * PanelLayout.current.scale : -14
         let timing = CAMediaTimingFunction(controlPoints: 0.50, 0.00, 0.75, 0.20) // easeInQuart
+        stopHandMotionTimer()
         stopPanelKeyMonitoring()
         stopDismissMonitoring()
         stopModifierMonitoring()
         CATransaction.begin()
-        CATransaction.setAnimationDuration(0.16)
+        CATransaction.setAnimationDuration(handStyle ? 0.22 : 0.16)
         CATransaction.setAnimationTimingFunction(timing)
         CATransaction.setCompletionBlock { [weak self] in
             Task { @MainActor [weak self] in
@@ -344,9 +482,9 @@ final class PanelController: NSObject {
 
         let translate = CABasicAnimation(keyPath: "transform")
         translate.fromValue = CATransform3DIdentity
-        translate.toValue = CATransform3DMakeTranslation(0, -14, 0)
+        translate.toValue = CATransform3DMakeTranslation(0, hideOffset, 0)
         layer.add(translate, forKey: "hideSlide")
-        layer.transform = CATransform3DMakeTranslation(0, -14, 0)
+        layer.transform = CATransform3DMakeTranslation(0, hideOffset, 0)
 
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = 1
@@ -420,7 +558,7 @@ final class PanelController: NSObject {
         let signature = cardRenderSignature()
         let needsCards = visibleItems.isEmpty
             ? emptyView == nil
-            : cardStack.arrangedSubviews.isEmpty
+            : (usesCardHandStyle ? handCardLayer.subviews.isEmpty : cardStack.arrangedSubviews.isEmpty)
         if signature != lastRenderedCardSignature || needsCards {
             rebuildCards(mode: mode)
             lastRenderedCardSignature = signature
@@ -442,13 +580,22 @@ final class PanelController: NSObject {
             "base": "\(baseItems.count)",
             "visible": "\(visibleItems.count)",
             "rendered": "\(renderedCardCount)",
-            "cards": "\(cardStack.arrangedSubviews.count)",
+            "cards": "\(usesCardHandStyle ? handCardLayer.subviews.count : cardStack.arrangedSubviews.count)",
             "ms": EasyPasteDiagnostics.elapsedMS(since: reloadStart)
         ])
     }
 
     private func cardRenderSignature() -> CardRenderSignature {
-        CardRenderSignature(
+        if usesCardHandStyle {
+            return CardRenderSignature(
+                selector: store.activeBoardSelector,
+                query: searchField.stringValue,
+                itemKeys: ["style:cardHand", "selected:\(selectedItemID?.uuidString ?? "none")"] + handItems().map { item in
+                    "\(item.id.uuidString):\(item.hash):\(item.updatedAt.timeIntervalSinceReferenceDate):\(item.pinned)"
+                } + ["count:\(visibleItems.count)"]
+            )
+        }
+        return CardRenderSignature(
             selector: store.activeBoardSelector,
             query: searchField.stringValue,
             itemKeys: Array(visibleItems.prefix(renderedCardCount)).map { item in
@@ -458,6 +605,9 @@ final class PanelController: NSObject {
     }
 
     private func visibleInitialCardRenderLimit() -> Int {
+        if usesCardHandStyle {
+            return handItems().count
+        }
         rootView.layoutSubtreeIfNeeded()
         let visibleWidth = max(scrollView.contentView.bounds.width, window.frame.width - PanelLayout.current.hPad * 2)
         let stride = max(CardLayout.cardWidth + PanelLayout.current.cardSpacing, 1)
@@ -488,6 +638,7 @@ final class PanelController: NSObject {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
+        window.acceptsMouseMovedEvents = true
         // canJoinAllSpaces — 在所有 Space 都可见
         // fullScreenAuxiliary — 允许在全屏 App 上方浮起（关键）
         // stationary — 切换 Space 时不跟着动
@@ -530,6 +681,7 @@ final class PanelController: NSObject {
         window.contentView = container
 
         let toolbar = makeToolbar()
+        toolbarView = toolbar
         configureSearch()
         configureTabStrip()
         configureCardsArea()
@@ -552,9 +704,17 @@ final class PanelController: NSObject {
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         tabStrip.translatesAutoresizingMaskIntoConstraints = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        handBackdropView.translatesAutoresizingMaskIntoConstraints = false
+        handBackdropView.isHidden = true
+        handCardLayer.translatesAutoresizingMaskIntoConstraints = false
+        handCardLayer.wantsLayer = true
+        handCardLayer.layer?.masksToBounds = false
+        handCardLayer.isHidden = true
 
         content.addSubview(toolbar)
         content.addSubview(scrollView)
+        content.addSubview(handBackdropView)
+        content.addSubview(handCardLayer)
 
         let m = PanelLayout.current
         let hPad = m.hPad
@@ -588,7 +748,17 @@ final class PanelController: NSObject {
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: hPad),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -hPad),
             scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 6),
-            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -vBottom)
+            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -vBottom),
+
+            handBackdropView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            handBackdropView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            handBackdropView.topAnchor.constraint(equalTo: content.topAnchor),
+            handBackdropView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+
+            handCardLayer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            handCardLayer.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            handCardLayer.topAnchor.constraint(equalTo: content.topAnchor),
+            handCardLayer.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
         applyTheme()
     }
@@ -598,15 +768,37 @@ final class PanelController: NSObject {
         window.appearance = EasyPasteThemeStore.appearance
         let glassOpacity = min(1.0, max(0.0, store.preferences.panelGlassOpacity))
         let glassAvailable = PanelGlassCapability.isAvailable
-        panelEffectView.isHidden = !glassAvailable
+        let handStyle = usesCardHandStyle
+        window.hasShadow = !handStyle
+        panelEffectView.isHidden = handStyle || !glassAvailable
         panelEffectView.material = theme.panelMaterial
-        panelEffectView.alphaValue = glassAvailable ? 0.28 + 0.72 * glassOpacity : 0
+        panelEffectView.alphaValue = handStyle ? 0 : (glassAvailable ? 0.28 + 0.72 * glassOpacity : 0)
         rootView.layer?.backgroundColor = NSColor.clear.cgColor
-        panelBackdropView.layer?.backgroundColor = (glassAvailable
-            ? theme.panelBackground(opacity: glassOpacity)
-            : theme.panelSolidBackground
-        ).cgColor
-        rootView.layer?.borderColor = theme.panelBorder.cgColor
+        panelBackdropView.layer?.backgroundColor = handStyle
+            ? NSColor.clear.cgColor
+            : (glassAvailable
+                ? theme.panelBackground(opacity: glassOpacity)
+                : theme.panelSolidBackground
+            ).cgColor
+        rootView.layer?.cornerRadius = handStyle ? 0 : PanelLayout.current.panelCornerRadius
+        rootView.layer?.masksToBounds = !handStyle
+        rootView.layer?.borderWidth = handStyle ? 0 : 0.8
+        rootView.layer?.borderColor = (handStyle ? NSColor.clear : theme.panelBorder).cgColor
+        toolbarView?.alphaValue = handStyle ? 0 : 1
+        handBackdropView.isHidden = !handStyle
+        handBackdropView.needsDisplay = true
+        handCardLayer.isHidden = !handStyle
+        if !handStyle {
+            stopHandMotionTimer()
+        } else if window.isVisible {
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                stopHandMotionTimer()
+            } else {
+                stopHandMotionTimer()
+            }
+        }
+        scrollView.isHidden = handStyle || visibleItems.isEmpty
+        updateCardPresentation()
 
         titlePill.layer?.backgroundColor = theme.pillBackground.cgColor
         titlePill.layer?.borderColor = theme.pillBorder.cgColor
@@ -952,6 +1144,10 @@ final class PanelController: NSObject {
         emptyView = nil
 
         if visibleItems.isEmpty {
+            handCardLayer.subviews.forEach { $0.removeFromSuperview() }
+            handCardOrder.removeAll()
+            handCardLayer.isHidden = true
+            handBackdropView.isHidden = true
             let message: String
             if !searchField.stringValue.isEmpty {
                 message = L10n.t("panel.emptySearch")
@@ -976,41 +1172,39 @@ final class PanelController: NSObject {
             return
         }
 
-        scrollView.isHidden = false
-
-        appendCards(upTo: renderedCardCount, mode: mode)
+        if usesCardHandStyle {
+            scrollView.isHidden = true
+            handBackdropView.isHidden = false
+            handCardLayer.isHidden = false
+            rebuildHandCards(mode: mode)
+        } else {
+            handBackdropView.isHidden = true
+            handCardLayer.isHidden = true
+            handCardLayer.subviews.forEach { $0.removeFromSuperview() }
+            handCardOrder.removeAll()
+            scrollView.isHidden = false
+            appendCards(upTo: renderedCardCount, mode: mode)
+        }
+        updateCardPresentation()
         EasyPasteDiagnostics.log("panel.cards.rebuild", [
             "visible": "\(visibleItems.count)",
-            "rendered": "\(cardStack.arrangedSubviews.count)",
+            "rendered": "\(usesCardHandStyle ? handCardLayer.subviews.count : cardStack.arrangedSubviews.count)",
             "ms": EasyPasteDiagnostics.elapsedMS(since: renderStart)
         ])
     }
 
     private func appendCards(upTo targetCount: Int, mode: PanelReloadMode = .fullReuse) {
+        guard !usesCardHandStyle else {
+            rebuildHandCards(mode: mode)
+            return
+        }
         guard targetCount > cardStack.arrangedSubviews.count else { return }
         let appendStart = EasyPasteDiagnostics.now()
         let previousCount = cardStack.arrangedSubviews.count
         let cappedCount = min(targetCount, visibleItems.count)
         for index in cardStack.arrangedSubviews.count..<cappedCount {
             let item = visibleItems[index]
-            let card = ClipCardView(item: item, renderMode: .lightweight)
-            card.isSelected = item.id == selectedItemID
-            card.shortcutHint = shortcutHint(forCardAt: index)
-            card.onSelect = { [weak self] id, shouldPaste, flags in
-                guard let self else { return }
-                let wasSelected = self.selectedItemID == id
-                self.selectItem(id)
-                guard shouldPaste else { return }
-                guard let item = self.visibleItems.first(where: { $0.id == id }) else { return }
-                if flags.contains(.shift), item.kind != .image {
-                    self.pasteSelected(transform: .plain)
-                } else if wasSelected {
-                    self.pasteSelected(transform: .original)
-                }
-            }
-            card.onContextMenu = { [weak self] id, event in
-                self?.showItemContextMenu(itemID: id, at: event)
-            }
+            let card = makeCard(for: item, index: index)
             cardStack.addArrangedSubview(card)
         }
         EasyPasteDiagnostics.log("panel.cards.append", [
@@ -1021,10 +1215,124 @@ final class PanelController: NSObject {
         if window.isVisible || mode == .initialLightweight {
             hydrateRenderedCards()
         }
+        updateCardPresentation()
+    }
+
+    private func makeCard(for item: ClipboardItem, index: Int) -> ClipCardView {
+        let visualStyle: ClipCardVisualStyle = usesCardHandStyle ? .cardHandExperimental : .classic
+        let metrics = visualStyle == .cardHandExperimental
+            ? handCardMetrics()
+            : CardLayout.current
+        let card = ClipCardView(
+            item: item,
+            metrics: metrics,
+            renderMode: .lightweight,
+            visualStyle: visualStyle
+        )
+        card.isSelected = item.id == selectedItemID
+        card.shortcutHint = shortcutHint(forCardAt: index)
+        card.onSelect = { [weak self] id, shouldPaste, flags in
+            guard let self else { return }
+            let wasSelected = self.selectedItemID == id
+            self.selectItem(id)
+            guard shouldPaste else { return }
+            guard let item = self.visibleItems.first(where: { $0.id == id }) else { return }
+            if flags.contains(.shift), item.kind != .image {
+                self.pasteSelected(transform: .plain)
+            } else if wasSelected {
+                self.pasteSelected(transform: .original)
+            }
+        }
+        card.onContextMenu = { [weak self] id, event in
+            self?.showItemContextMenu(itemID: id, at: event)
+        }
+        return card
+    }
+
+    private func rebuildHandCards(
+        mode: PanelReloadMode = .fullReuse,
+        animateEdgeChanges: Bool = true
+    ) {
+        let desiredItems = handItems()
+        let desiredIDs = Set(desiredItems.map(\.id))
+        let existingCards = Dictionary(
+            uniqueKeysWithValues: handCardLayer.subviews.compactMap { view -> (UUID, ClipCardView)? in
+                guard let card = view as? ClipCardView else { return nil }
+                guard !handExitingCardIDs.contains(card.itemID) else { return nil }
+                return (card.itemID, card)
+            }
+        )
+
+        handCardOrder.removeAll()
+
+        for item in desiredItems {
+            let card = existingCards[item.id] ?? makeCard(
+                for: item,
+                index: visibleItems.firstIndex(where: { $0.id == item.id }) ?? 0
+            )
+            card.allowsHitTesting = true
+            card.setHandSelected(item.id == selectedItemID, animated: false)
+            card.shortcutHint = shortcutHint(forCardWithID: item.id)
+            if card.superview == nil {
+                if animateEdgeChanges,
+                   window.isVisible,
+                   mode == .fullReuse,
+                   !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    handIncomingCardIDs.insert(card.itemID)
+                }
+                handCardLayer.addSubview(card)
+            }
+            handCardOrder.append(card.itemID)
+        }
+
+        for (id, card) in existingCards where !desiredIDs.contains(id) {
+            removeHandCard(card, id: id, animated: animateEdgeChanges)
+        }
+        renderedCardCount = desiredItems.count
+        if window.isVisible || mode == .initialLightweight {
+            hydrateRenderedCards()
+        }
+        updateCardPresentation()
+    }
+
+    private func removeHandCard(_ card: ClipCardView, id: UUID, animated: Bool = true) {
+        handIncomingCardIDs.remove(id)
+        card.allowsHitTesting = false
+        guard animated,
+              window.isVisible,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            handExitingCardIDs.remove(id)
+            card.removeFromSuperview()
+            return
+        }
+
+        guard !handExitingCardIDs.contains(id) else { return }
+        handExitingCardIDs.insert(id)
+        card.handBaseZPosition -= 36
+        card.presentationTransform = card.presentationTransform
+            .translatedBy(x: 0, y: -72)
+            .scaledBy(x: 0.96, y: 0.96)
+
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.40, 0.00, 0.70, 0.35)
+            ctx.allowsImplicitAnimation = true
+            card.animator().alphaValue = 0
+        } completionHandler: { [weak self, weak card] in
+            Task { @MainActor [weak self, weak card] in
+                self?.handExitingCardIDs.remove(id)
+                card?.removeFromSuperview()
+            }
+        }
     }
 
     private func hydrateRenderedCards() {
-        for (index, view) in cardStack.arrangedSubviews.enumerated() {
+        let cardViews: [NSView] = usesCardHandStyle
+            ? handCardOrder.compactMap { id in
+                handCardLayer.subviews.first { ($0 as? ClipCardView)?.itemID == id }
+            }
+            : cardStack.arrangedSubviews
+        for (index, view) in cardViews.enumerated() {
             guard let card = view as? ClipCardView else { continue }
             card.hydrateAsync(priorityIndex: index)
         }
@@ -1032,16 +1340,229 @@ final class PanelController: NSObject {
 
     private func updateRenderedCardState() {
         emptyView?.isHidden = !visibleItems.isEmpty
+        if usesCardHandStyle {
+            scrollView.isHidden = true
+            handBackdropView.isHidden = visibleItems.isEmpty
+            handCardLayer.isHidden = visibleItems.isEmpty
+            rebuildHandCards()
+            return
+        }
+        handBackdropView.isHidden = true
+        handCardLayer.isHidden = true
         scrollView.isHidden = visibleItems.isEmpty
         for (index, view) in cardStack.arrangedSubviews.enumerated() {
             guard let card = view as? ClipCardView else { continue }
             card.isSelected = card.itemID == selectedItemID
             card.shortcutHint = shortcutHint(forCardAt: index)
         }
+        updateCardPresentation()
     }
 
     @objc private func scrollViewBoundsDidChange(_ note: Notification) {
+        updateCardPresentation()
+        guard !usesCardHandStyle else { return }
         extendRenderedCardsIfNeeded()
+    }
+
+    private func updateCardPresentation() {
+        let handStyle = usesCardHandStyle
+        if handStyle {
+            cardStack.spacing = PanelLayout.current.cardSpacing
+            cardStack.edgeInsets = NSEdgeInsets(top: 3, left: 0, bottom: 3, right: 0)
+            updateHandCardPresentation()
+            return
+        } else {
+            cardStack.spacing = PanelLayout.current.cardSpacing
+            cardStack.edgeInsets = NSEdgeInsets(top: 3, left: 0, bottom: 3, right: 0)
+        }
+
+        let centerSlot = cardStack.arrangedSubviews.firstIndex {
+            ($0 as? ClipCardView)?.itemID == selectedItemID
+        } ?? min(handSideSlotCount, max(0, cardStack.arrangedSubviews.count / 2))
+        for (slotIndex, view) in cardStack.arrangedSubviews.enumerated() {
+            guard let card = view as? ClipCardView else { continue }
+            guard handStyle,
+                  visibleItems.contains(where: { $0.id == card.itemID }) else {
+                card.presentationTransform = .identity
+                card.handBaseZPosition = 0
+                continue
+            }
+
+            let visibleDelta = slotIndex - centerSlot
+            let distance = abs(visibleDelta)
+            let isSelected = card.itemID == selectedItemID
+            let nearbyLift = CGFloat(max(0, 58 - distance * 16)) * PanelLayout.current.scale
+            let lift = isSelected ? -92 * PanelLayout.current.scale : -nearbyLift
+            let sidePush = CGFloat(visibleDelta) * 18 * PanelLayout.current.scale
+            let rotation = CGFloat(visibleDelta) * 0.075
+            let scale = isSelected ? 1.06 : max(0.92, 0.99 - CGFloat(distance) * 0.025)
+
+            card.presentationTransform = CGAffineTransform(translationX: sidePush, y: lift)
+                .rotated(by: rotation)
+                .scaledBy(x: scale, y: scale)
+            card.handBaseZPosition = isSelected ? 100 : CGFloat(40 - distance * 4)
+        }
+    }
+
+    private func updateHandCardPresentation(
+        pointerInteraction: Bool = false,
+        continuousMotion: Bool = false,
+        immediate: Bool = false
+    ) {
+        guard usesCardHandStyle else { return }
+        handCardLayer.layoutSubtreeIfNeeded()
+        let stageWidth = max(handCardLayer.bounds.width, window.frame.width)
+        let stageHeight = max(handCardLayer.bounds.height, window.frame.height, 1)
+        let screenFrame = handCurrentScreenFrame()
+        let screenAspectRatio = stageWidth / max(screenFrame.height, 1)
+        let metrics = handCardMetrics(viewportWidth: stageWidth)
+        let centerX = stageWidth / 2 - metrics.cardWidth / 2
+        let baseBottom = handCardBaseBottom(for: stageWidth)
+        let nowMS = ProcessInfo.processInfo.systemUptime * 1_000
+
+        var playedDealAnimation = false
+        for (slotIndex, id) in handCardOrder.enumerated() {
+            guard let card = handCardLayer.subviews.first(where: { ($0 as? ClipCardView)?.itemID == id }) as? ClipCardView,
+                  let offset = handOffset(for: id),
+                  let slot = handSlot(
+                    for: offset,
+                    slotIndex: slotIndex,
+                    nowMS: nowMS,
+                    viewportWidth: stageWidth,
+                    viewportHeight: stageHeight,
+                    screenAspectRatio: screenAspectRatio
+                  ) else {
+                continue
+            }
+            let x = centerX + slot.x
+            let y = baseBottom + slot.liftFromBase
+            let finalFrame = NSRect(x: x, y: y, width: metrics.cardWidth, height: metrics.cardHeight)
+            let rotation = slot.rotationDegrees * .pi / 180
+            let transform = CGAffineTransform(rotationAngle: rotation)
+                .scaledBy(x: slot.scale, y: slot.scale)
+            let hoverTranslationY: CGFloat = offset == 0 ? 5 : 18
+            let hoverScale = 1 + (0.008 / max(slot.scale, 0.01))
+
+            let shouldPlayIncomingAnimation = handIncomingCardIDs.contains(id)
+                && window.isVisible
+                && !continuousMotion
+                && !immediate
+                && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let shouldAnimate = window.isVisible
+                && card.window != nil
+                && !continuousMotion
+                && !immediate
+                && !shouldPlayIncomingAnimation
+                && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let previousPosition = card.layer?.position
+            let previousTransform = card.layer?.transform
+            let previousFrame = card.frame
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            card.frame = finalFrame
+            card.setHandPresentation(
+                transform: transform,
+                hoverTranslationY: hoverTranslationY,
+                hoverScale: hoverScale,
+                zPosition: slot.zPosition,
+                animated: false
+            )
+            card.alphaValue = 1
+            CATransaction.commit()
+
+            if shouldAnimate,
+               previousFrame != .zero,
+               let layer = card.layer,
+               let previousPosition,
+               let previousTransform {
+                layer.removeAnimation(forKey: "handPosePosition")
+                layer.removeAnimation(forKey: "handPoseTransform")
+
+                let duration = pointerInteraction ? 0.10 : 0.20
+                let timing = CAMediaTimingFunction(controlPoints: 0.22, 0.82, 0.18, 1.00)
+
+                let positionAnimation = CABasicAnimation(keyPath: "position")
+                positionAnimation.fromValue = previousPosition
+                positionAnimation.toValue = layer.position
+                positionAnimation.duration = duration
+                positionAnimation.timingFunction = timing
+                layer.add(positionAnimation, forKey: "handPosePosition")
+
+                let transformAnimation = CABasicAnimation(keyPath: "transform")
+                transformAnimation.fromValue = previousTransform
+                transformAnimation.toValue = layer.transform
+                transformAnimation.duration = duration
+                transformAnimation.timingFunction = timing
+                layer.add(transformAnimation, forKey: "handPoseTransform")
+            }
+            if needsHandDealAnimation && window.isVisible {
+                handIncomingCardIDs.remove(id)
+                card.playHandDealAnimation(
+                    delay: Double(slotIndex) * 0.034,
+                    initialRotation: (slot.rotationDegrees - 5) * .pi / 180,
+                    initialScale: 0.965,
+                    verticalDrop: 112
+                )
+                playedDealAnimation = true
+            } else if shouldPlayIncomingAnimation {
+                handIncomingCardIDs.remove(id)
+                card.playHandDealAnimation(
+                    delay: 0,
+                    initialRotation: (slot.rotationDegrees - 5) * .pi / 180,
+                    initialScale: 0.965,
+                    verticalDrop: 112
+                )
+            }
+        }
+        if playedDealAnimation {
+            needsHandDealAnimation = false
+        }
+    }
+
+    private func handViewportWidth() -> CGFloat {
+        let windowWidth = window.frame.width
+        if windowWidth > 0 {
+            return windowWidth
+        }
+        return currentScreen()?.frame.width ?? NSScreen.main?.frame.width ?? 1440
+    }
+
+    private func handCardMetrics(viewportWidth: CGFloat? = nil) -> CardMetrics {
+        CardMetrics(
+            scale: 1,
+            visualStyle: .cardHandExperimental,
+            viewportWidth: viewportWidth ?? handViewportWidth()
+        )
+    }
+
+    private func handCardBaseBottom(for viewportWidth: CGFloat) -> CGFloat {
+        viewportWidth <= 560 ? -86 : -112
+    }
+
+    private func handCurrentScreenFrame() -> NSRect {
+        (window.screen ?? currentScreen() ?? NSScreen.main ?? NSScreen.screens.first)?.frame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    }
+
+    private func handLayoutProfile(for screenAspectRatio: CGFloat) -> HandLayoutProfile {
+        let wideBias = clamp((screenAspectRatio - 1.62) / 0.68, min: 0, max: 1)
+        let narrowBias = clamp((1.52 - screenAspectRatio) / 0.58, min: 0, max: 1)
+        return HandLayoutProfile(
+            spreadScale: 0.94 + wideBias * 0.08 - narrowBias * 0.18,
+            curveScale: 0.96 + wideBias * 0.08 - narrowBias * 0.16,
+            rotationScale: 0.96 + wideBias * 0.08 - narrowBias * 0.22,
+            selectedLift: 122 + wideBias * 5 - narrowBias * 14,
+            selectedScaleBoost: wideBias * 0.004 - narrowBias * 0.012,
+            neighborNudgeX: 10 + wideBias * 3 - narrowBias * 4,
+            neighborNudgeY: 8 + wideBias * 2 - narrowBias * 3,
+            stageHeightRatio: 0.62 - wideBias * 0.08 + narrowBias * 0.06,
+            topPadding: 52 - wideBias * 4 - narrowBias * 8
+        )
+    }
+
+    private func stopHandMotionTimer() {
+        handMotionTimer?.invalidate()
+        handMotionTimer = nil
     }
 
     private func extendRenderedCardsIfNeeded() {
@@ -1419,8 +1940,16 @@ final class PanelController: NSObject {
     private func updateShortcutHints(mode: PanelShortcutHintMode) {
         guard shortcutHintMode != mode else { return }
         shortcutHintMode = mode
+        if usesCardHandStyle {
+            for view in handCardLayer.subviews {
+                guard let card = view as? ClipCardView else { continue }
+                card.shortcutHint = shortcutHint(forCardWithID: card.itemID)
+            }
+            return
+        }
         for (index, view) in cardStack.arrangedSubviews.enumerated() {
-            (view as? ClipCardView)?.shortcutHint = shortcutHint(forCardAt: index)
+            guard let card = view as? ClipCardView else { continue }
+            card.shortcutHint = shortcutHint(forCardAt: index)
         }
     }
 
@@ -1434,6 +1963,26 @@ final class PanelController: NSObject {
             return CardShortcutHint(commandNumber: nil, showsPlainText: true)
         case .commandNumbersAndPlainText:
             return CardShortcutHint(commandNumber: index < 9 ? index + 1 : nil, showsPlainText: true)
+        }
+    }
+
+    private func shortcutHint(forCardWithID id: UUID) -> CardShortcutHint {
+        guard usesCardHandStyle,
+              let offset = handOffset(for: id) else {
+            let index = visibleItems.firstIndex { $0.id == id } ?? 0
+            return shortcutHint(forCardAt: index)
+        }
+
+        let commandNumber = offset >= 0 && offset < 9 ? offset + 1 : nil
+        switch shortcutHintMode {
+        case .none:
+            return .none
+        case .commandNumbers:
+            return CardShortcutHint(commandNumber: commandNumber, showsPlainText: false)
+        case .plainText:
+            return CardShortcutHint(commandNumber: nil, showsPlainText: true)
+        case .commandNumbersAndPlainText:
+            return CardShortcutHint(commandNumber: commandNumber, showsPlainText: true)
         }
     }
 
@@ -1454,9 +2003,26 @@ final class PanelController: NSObject {
             return
         }
 
-        // 接近 Paste 的贴底浮层：跟随鼠标所在屏幕，但左右和底部都留一点呼吸感。
         let full = screen.frame
         let visible = screen.visibleFrame
+        if usesCardHandStyle {
+            let windowHeight = currentPanelHeight()
+            let target = NSRect(
+                x: full.minX,
+                y: visible.minY,
+                width: full.width,
+                height: windowHeight
+            )
+            window.minSize = NSSize(width: 100, height: 100)
+            window.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            window.setFrame(target, display: true)
+            applyRootInsets(windowFrame: target, screenFrame: full)
+            window.contentView?.layoutSubtreeIfNeeded()
+            updateCardPresentation()
+            return
+        }
+
+        // 接近 Paste 的贴底浮层：跟随鼠标所在屏幕，但左右和底部都留一点呼吸感。
         let bottomInset = bottomPanelInset(for: full)
         applyRootInsets(windowFrame: NSRect(x: 0, y: 0, width: full.width, height: currentPanelHeight() + bottomInset), screenFrame: full)
 
@@ -1477,7 +2043,27 @@ final class PanelController: NSObject {
     }
 
     private func currentPanelHeight() -> CGFloat {
-        PanelLayout.current.panelHeight
+        if usesCardHandStyle {
+            let screenFrame = currentScreen()?.frame
+                ?? NSScreen.main?.frame
+                ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            return handStageHeight(for: screenFrame)
+        }
+        return PanelLayout.current.panelHeight
+    }
+
+    private func handStageHeight(for screenFrame: NSRect) -> CGFloat {
+        let metrics = handCardMetrics(viewportWidth: screenFrame.width)
+        let baseBottom = handCardBaseBottom(for: screenFrame.width)
+        let screenAspectRatio = screenFrame.width / max(screenFrame.height, 1)
+        let profile = handLayoutProfile(for: screenAspectRatio)
+        let selectedScale: CGFloat = (screenFrame.width < 560 ? 1.044 : 1.060) + profile.selectedScaleBoost
+        let transformedTop = baseBottom
+            + profile.selectedLift
+            + metrics.cardHeight * (-0.15 + 1.15 * selectedScale)
+        let preferredHeight = transformedTop + profile.topPadding
+        let maxHeight = min(520, max(300, screenFrame.height * profile.stageHeightRatio))
+        return round(min(maxHeight, max(300, preferredHeight)))
     }
 
     private func bottomPanelInset(for screenFrame: NSRect) -> CGFloat {
@@ -1493,6 +2079,9 @@ final class PanelController: NSObject {
     private func rootFrame(windowFrame: NSRect, screenFrame: NSRect) -> NSRect {
         let effectiveWidth = windowFrame.width > 0 ? windowFrame.width : screenFrame.width
         let effectiveHeight = windowFrame.height > 0 ? windowFrame.height : currentPanelHeight()
+        if usesCardHandStyle {
+            return NSRect(x: 0, y: 0, width: effectiveWidth, height: effectiveHeight)
+        }
         let insetX = round(effectiveWidth * PanelLayout.current.panelHorizontalInsetRatio)
         let bottomInset = round(screenFrame.height * PanelLayout.current.panelBottomInsetRatio)
         return NSRect(
@@ -1508,6 +2097,23 @@ final class PanelController: NSObject {
         guard window.isVisible, let screen = currentScreen() else { return }
         let full = screen.frame
         let visible = screen.visibleFrame
+        if usesCardHandStyle {
+            let target = NSRect(
+                x: full.minX,
+                y: visible.minY,
+                width: full.width,
+                height: currentPanelHeight()
+            )
+            if target == window.frame { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.20
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.20, 0.90, 0.30, 1.00)
+                ctx.allowsImplicitAnimation = true
+                window.animator().setFrame(target, display: true)
+                rootView.animator().frame = rootFrame(windowFrame: target, screenFrame: full)
+            }
+            return
+        }
         let bottomInset = bottomPanelInset(for: full)
         applyRootInsets(windowFrame: window.frame, screenFrame: full)
 
@@ -1669,14 +2275,152 @@ final class PanelController: NSObject {
 
     // MARK: - Selection
 
+    private func wrappedItemIndex(_ index: Int) -> Int {
+        guard !visibleItems.isEmpty else { return 0 }
+        return (index % visibleItems.count + visibleItems.count) % visibleItems.count
+    }
+
+    private func handItems() -> [ClipboardItem] {
+        guard !visibleItems.isEmpty else { return [] }
+        let center = visibleItems.firstIndex { $0.id == selectedItemID } ?? 0
+        return handOffsets().map { offset in
+            visibleItems[wrappedItemIndex(center + offset)]
+        }
+    }
+
+    private func handOffsets() -> [Int] {
+        guard !visibleItems.isEmpty else { return [] }
+        let slotCount = min(visibleItems.count, handSideSlotCount * 2 + 1)
+        let prototypeOrder = [0, 1, 2, 3, -3, -2, -1]
+        var offsets: [Int] = []
+        var seenIndexes: Set<Int> = []
+        for offset in prototypeOrder {
+            let wrapped = wrappedItemIndex((visibleItems.firstIndex { $0.id == selectedItemID } ?? 0) + offset)
+            guard !seenIndexes.contains(wrapped) else { continue }
+            offsets.append(offset)
+            seenIndexes.insert(wrapped)
+            if offsets.count == slotCount {
+                break
+            }
+        }
+        return offsets
+    }
+
+    private func handSlot(
+        for offset: Int,
+        slotIndex: Int,
+        nowMS: TimeInterval,
+        viewportWidth: CGFloat,
+        viewportHeight: CGFloat,
+        screenAspectRatio: CGFloat
+    ) -> HandCardSlot? {
+        guard abs(offset) <= handSideSlotCount else { return nil }
+        let metrics = handCardMetrics(viewportWidth: viewportWidth)
+        let pose = handBasePose(
+            for: offset,
+            slotIndex: slotIndex,
+            nowMS: nowMS,
+            viewportWidth: viewportWidth,
+            screenAspectRatio: screenAspectRatio,
+            cardWidth: metrics.cardWidth
+        )
+        let distance = abs(offset)
+        return HandCardSlot(
+            offset: offset,
+            x: pose.x,
+            liftFromBase: -pose.y,
+            rotationDegrees: pose.rotationDegrees,
+            scale: pose.scale,
+            zPosition: offset == 0 ? 120 : CGFloat(76 - distance * 12 + (offset > 0 ? 4 : 0))
+        )
+    }
+
+    private func handBasePose(
+        for offset: Int,
+        slotIndex: Int,
+        nowMS: TimeInterval,
+        viewportWidth: CGFloat,
+        screenAspectRatio: CGFloat,
+        cardWidth: CGFloat
+    ) -> HandBasePose {
+        let distance = abs(offset)
+        let sign = offset == 0 ? CGFloat(0) : CGFloat(offset > 0 ? 1 : -1)
+        let profile = handLayoutProfile(for: screenAspectRatio)
+        let spread = clamp(
+            viewportWidth * 0.092 * profile.spreadScale,
+            min: cardWidth * 0.46,
+            max: cardWidth * 0.70
+        )
+        let idle = CGFloat(0)
+        var x = sign * pow(CGFloat(distance), 1.03) * spread
+        var y = pow(CGFloat(distance), 1.34) * 15 * profile.curveScale - 54 + idle
+        var rotation = -CGFloat(offset) * 5.4 * profile.rotationScale
+        let attentionBias = offset < 0 ? -0.050 * CGFloat(distance) : 0.012 * CGFloat(distance)
+        var scale = 0.994 - CGFloat(distance) * 0.008 + attentionBias
+
+        if offset == 0 {
+            y = -profile.selectedLift + idle * 0.35
+            rotation *= 0.14
+            scale = (viewportWidth < 560 ? 1.036 : 1.048) + profile.selectedScaleBoost
+        } else if distance <= 2 {
+            let give = CGFloat(3 - distance)
+            x += sign * give * profile.neighborNudgeX
+            y -= give * profile.neighborNudgeY
+            rotation -= sign * give * 1.1 * profile.rotationScale
+        }
+
+        return HandBasePose(x: x, y: y, rotationDegrees: rotation, scale: scale)
+    }
+
+    private func clamp(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
+        max(minValue, min(maxValue, value))
+    }
+
+    private func handOffset(for id: UUID) -> Int? {
+        guard !visibleItems.isEmpty,
+              let center = visibleItems.firstIndex(where: { $0.id == selectedItemID }),
+              let index = visibleItems.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        for offset in handOffsets() where wrappedItemIndex(center + offset) == index {
+            return offset
+        }
+        var offset = index - center
+        let half = visibleItems.count / 2
+        if offset > half {
+            offset -= visibleItems.count
+        } else if offset < -half {
+            offset += visibleItems.count
+        }
+        return offset
+    }
+
+    private func quickPasteItem(atCommandIndex commandIndex: Int) -> ClipboardItem? {
+        guard visibleItems.indices.contains(commandIndex) || usesCardHandStyle else { return nil }
+        if usesCardHandStyle {
+            guard !visibleItems.isEmpty else { return nil }
+            guard commandIndex <= handSideSlotCount else { return nil }
+            let center = visibleItems.firstIndex { $0.id == selectedItemID } ?? 0
+            return visibleItems[wrappedItemIndex(center + commandIndex)]
+        }
+        return visibleItems[commandIndex]
+    }
+
     private func moveSelection(by delta: Int) {
         guard !visibleItems.isEmpty else { return }
         let currentIndex = visibleItems.firstIndex { $0.id == selectedItemID } ?? 0
-        let nextIndex = max(0, min(visibleItems.count - 1, currentIndex + delta))
+        let nextIndex = usesCardHandStyle
+            ? wrappedItemIndex(currentIndex + delta)
+            : max(0, min(visibleItems.count - 1, currentIndex + delta))
         selectItem(visibleItems[nextIndex].id)
     }
 
     private func selectItem(_ id: UUID) {
+        if usesCardHandStyle {
+            selectedItemID = id
+            rebuildHandCards(animateEdgeChanges: false)
+            return
+        }
         if let index = visibleItems.firstIndex(where: { $0.id == id }),
            index >= renderedCardCount {
             renderedCardCount = min(visibleItems.count, index + 1)
@@ -1687,10 +2431,12 @@ final class PanelController: NSObject {
         for case let card as ClipCardView in cardStack.arrangedSubviews {
             card.isSelected = card.itemID == id
         }
+        updateCardPresentation()
         scrollSelectedCardIntoView()
     }
 
     private func scrollSelectedCardIntoView() {
+        guard !usesCardHandStyle else { return }
         guard let selectedItemID,
               let card = cardStack.arrangedSubviews.first(where: { ($0 as? ClipCardView)?.itemID == selectedItemID }) else {
             return
@@ -1700,6 +2446,7 @@ final class PanelController: NSObject {
     }
 
     private func scrollCardsToLeading() {
+        guard !usesCardHandStyle else { return }
         documentView.layoutSubtreeIfNeeded()
         scrollView.contentView.scroll(to: .zero)
         scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -1831,8 +2578,7 @@ final class PanelController: NSObject {
     }
 
     private func quickPaste(index: Int, transform: ClipboardTransform) {
-        guard visibleItems.indices.contains(index) else { return }
-        let item = visibleItems[index]
+        guard let item = quickPasteItem(atCommandIndex: index) else { return }
         selectItem(item.id)
         pasteSelected(transform: transform)
     }
@@ -2142,7 +2888,10 @@ final class PanelController: NSObject {
         }
         rootView.addSubview(picker)
 
-        if let card = cardStack.arrangedSubviews.first(where: { ($0 as? ClipCardView)?.itemID == selectedItemID }) {
+        let selectedCard = usesCardHandStyle
+            ? handCardLayer.subviews.first(where: { ($0 as? ClipCardView)?.itemID == selectedItemID })
+            : cardStack.arrangedSubviews.first(where: { ($0 as? ClipCardView)?.itemID == selectedItemID })
+        if let card = selectedCard {
             let cardFrame = card.convert(card.bounds, to: rootView)
             let pickerHeight: CGFloat = 36 + CGFloat(candidates.count) * 28
             let originX = max(12, min(cardFrame.midX - 120, rootView.bounds.width - 252))
@@ -2224,6 +2973,63 @@ private final class QuickPanel: NSPanel {
     override func flagsChanged(with event: NSEvent) {
         modifierHandler?(event.modifierFlags)
         super.flagsChanged(with: event)
+    }
+}
+
+private final class HandPanelBackdropView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !bounds.isEmpty else { return }
+        let theme = EasyPasteThemeStore.effectiveTheme
+        let center = CGPoint(x: bounds.midX, y: bounds.minY + 18)
+        NSGradient(colorsAndLocations:
+            (NSColor(calibratedRed: 0.85, green: 0.73, blue: 0.47, alpha: theme.isDark ? 0.22 : 0.16), 0.00),
+            (NSColor(calibratedRed: 0.47, green: 0.67, blue: 1.00, alpha: theme.isDark ? 0.11 : 0.08), 0.36),
+            (NSColor.clear, 0.72)
+        )?.draw(
+            fromCenter: center,
+            radius: 0,
+            toCenter: center,
+            radius: min(bounds.width * 0.46, 520),
+            options: []
+        )
+
+        let fadeRect = NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height * 0.38)
+        NSGradient(colorsAndLocations:
+            ((theme.isDark ? NSColor(calibratedWhite: 0.01, alpha: 0.36) : NSColor(calibratedWhite: 0.68, alpha: 0.18)), 0.00),
+            (NSColor.clear, 1.00)
+        )?.draw(in: fadeRect, angle: 90)
+    }
+}
+
+@MainActor
+private final class HandCardLayerView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0.01, bounds.contains(point) else { return nil }
+        let candidates = subviews.enumerated().sorted { lhs, rhs in
+            let leftZ = lhs.element.layer?.zPosition ?? 0
+            let rightZ = rhs.element.layer?.zPosition ?? 0
+            if leftZ == rightZ {
+                return lhs.offset > rhs.offset
+            }
+            return leftZ > rightZ
+        }
+
+        for (_, subview) in candidates {
+            guard !subview.isHidden, subview.alphaValue > 0.04 else { continue }
+            let localPoint = subview.convert(point, from: self)
+            if let hit = subview.hitTest(localPoint) {
+                return hit
+            }
+        }
+        return nil
     }
 }
 
