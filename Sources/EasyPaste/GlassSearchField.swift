@@ -13,6 +13,7 @@ final class GlassSearchField: NSView, NSTextFieldDelegate {
     var onCommitOrCancel: (() -> Void)?
     /// 搜索框持有焦点时，普通左右方向键仍交给面板切换卡片。
     var onHorizontalNavigation: ((Int) -> Void)?
+    var ignoresMouseEvents = false
 
     var stringValue: String {
         get { textField.stringValue }
@@ -106,19 +107,35 @@ final class GlassSearchField: NSView, NSTextFieldDelegate {
 
     /// 把 firstResponder 转给内嵌 NSTextField；外部 `window.makeFirstResponder(searchField)` 也能工作。
     override func becomeFirstResponder() -> Bool {
-        window?.makeFirstResponder(textField)
-        return true
+        focusTextInput()
     }
 
     /// 用户点击 view 任意位置都视为聚焦输入框
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(textField)
-        textField.currentEditor()?.selectedRange = NSRange(location: textField.stringValue.count, length: 0)
+        focusTextInput()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        ignoresMouseEvents ? nil : super.hitTest(point)
     }
 
     /// 兼容外部读取 currentEditor（focusSearch 用到）
     func currentEditor() -> NSText? {
         textField.currentEditor()
+    }
+
+    @discardableResult
+    func focusTextInput() -> Bool {
+        guard let window else { return false }
+        let focused = window.makeFirstResponder(textField)
+        if focused {
+            textField.currentEditor()?.selectedRange = NSRange(location: textField.stringValue.count, length: 0)
+        }
+        return focused
+    }
+
+    var isEditingText: Bool {
+        window?.firstResponder === textField.currentEditor()
     }
 
     func applyTheme(_ theme: EasyPasteTheme = EasyPasteThemeStore.effectiveTheme) {

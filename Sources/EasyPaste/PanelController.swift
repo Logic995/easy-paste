@@ -118,6 +118,11 @@ final class PanelController: NSObject {
     nonisolated(unsafe) private var themeObserver: NSObjectProtocol?
     nonisolated(unsafe) private var glassCapabilityObserver: NSObjectProtocol?
     private var modifierPollTimer: Timer?
+    private var promotedActivationForSearch = false
+    private var previousSearchInputSource: TISInputSource?
+    private var searchInputPrimed = false
+    private var suppressEmptySearchCollapseUntil: Date?
+    private var searchReloadTask: Task<Void, Never>?
     private var quickPasteHotKeyRefs: [EventHotKeyRef] = []
     private var quickPasteHotKeyHandler: EventHandlerRef?
     private var quickPasteInputCharacters: [Int: String] = [:]
@@ -133,6 +138,7 @@ final class PanelController: NSObject {
     private let panelBackdropView = NSView()
     private let titlePill = NSView()
     private let titleLabel = NSTextField(labelWithString: "Clipboard")
+    private let titleCountLabel = NSTextField(labelWithString: "0")
     private let clipboardIcon = NSImageView()
     private let searchToggleButton = SymbolButton(symbol: "magnifyingglass", tooltip: "搜索 (⌘F)")
     private let addButton = SymbolButton(symbol: "plus", tooltip: "新建 Pinboard (⇧⌘N)")
@@ -301,6 +307,10 @@ final class PanelController: NSObject {
         reloadData(scrollBehavior: .leading, mode: .initialLightweight)
         updateShortcutHints(for: NSEvent.modifierFlags)
         showAnimated()
+        if !handStyle {
+            activateForSearchInput()
+            primeSearchInput()
+        }
         EasyPasteDiagnostics.log("panel.show.firstFrame", [
             "ms": EasyPasteDiagnostics.elapsedMS(since: showStart),
             "visible": "\(visibleItems.count)",
@@ -439,6 +449,30 @@ final class PanelController: NSObject {
         CATransaction.commit()
     }
 
+    private func activateForSearchInput() {
+        previousSearchInputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()
+        if NSApp.activationPolicy() != .regular {
+            promotedActivationForSearch = true
+            NSApp.setActivationPolicy(.regular)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        restoreSearchInputSource()
+    }
+
+    private func deactivateAfterPanel() {
+        NSApp.deactivate()
+        if promotedActivationForSearch {
+            promotedActivationForSearch = false
+            NSApp.setActivationPolicy(.accessory)
+        }
+        previousSearchInputSource = nil
+    }
+
+    private func restoreSearchInputSource() {
+        guard let previousSearchInputSource else { return }
+        TISSelectInputSource(previousSearchInputSource)
+    }
+
     /// 反向：rootView 下滑 + 淡出后再 orderOut。
     func hideAnimated() {
         guard window.isVisible else { return }
@@ -446,6 +480,7 @@ final class PanelController: NSObject {
             stopHandMotionTimer()
             resetSearchStateForNextShow()
             window.orderOut(nil)
+            deactivateAfterPanel()
             return
         }
 
@@ -468,6 +503,7 @@ final class PanelController: NSObject {
                 self.stopPanelKeyMonitoring()
                 self.stopModifierMonitoring()
                 self.stopDismissMonitoring()
+                self.deactivateAfterPanel()
                 // 还原 layer 到初始态，给下次 show 用
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
@@ -623,6 +659,7 @@ final class PanelController: NSObject {
         case .board(let id): boardName = store.name(for: .board(id))
         }
         titleLabel.stringValue = boardName
+        titleCountLabel.stringValue = "\(visibleItems.count)"
     }
 
     // MARK: - Build
@@ -652,6 +689,9 @@ final class PanelController: NSObject {
         ]
         window.keyHandler = { [weak self] event in
             self?.handleKey(event) ?? false
+        }
+        window.keyPreprocessor = { [weak self] event in
+            self?.preparePrimedSearchForKeyDown(event)
         }
         window.modifierHandler = { [weak self] flags in
             self?.updateShortcutHints(for: flags)
@@ -803,6 +843,7 @@ final class PanelController: NSObject {
         titlePill.layer?.backgroundColor = theme.pillBackground.cgColor
         titlePill.layer?.borderColor = theme.pillBorder.cgColor
         titleLabel.textColor = theme.pillText
+        titleCountLabel.textColor = theme.pillText.withAlphaComponent(0.62)
         clipboardIcon.contentTintColor = theme.pillText
 
         searchToggleButton.applyTheme(theme)
@@ -833,8 +874,14 @@ final class PanelController: NSObject {
         titleLabel.backgroundColor = .clear
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        titleCountLabel.font = .monospacedDigitSystemFont(ofSize: max(10, PanelLayout.current.pillFontSize - 1), weight: .semibold)
+        titleCountLabel.backgroundColor = .clear
+        titleCountLabel.alignment = .right
+        titleCountLabel.translatesAutoresizingMaskIntoConstraints = false
+
         titlePill.addSubview(clipboardIcon)
         titlePill.addSubview(titleLabel)
+        titlePill.addSubview(titleCountLabel)
 
         let m = PanelLayout.current
         NSLayoutConstraint.activate([
@@ -845,8 +892,11 @@ final class PanelController: NSObject {
             clipboardIcon.widthAnchor.constraint(equalToConstant: m.pillIconSize),
             clipboardIcon.heightAnchor.constraint(equalToConstant: m.pillIconSize),
             titleLabel.leadingAnchor.constraint(equalTo: clipboardIcon.trailingAnchor, constant: 6),
-            titleLabel.trailingAnchor.constraint(equalTo: titlePill.trailingAnchor, constant: -12),
-            titleLabel.centerYAnchor.constraint(equalTo: titlePill.centerYAnchor)
+            titleLabel.trailingAnchor.constraint(equalTo: titleCountLabel.leadingAnchor, constant: -7),
+            titleLabel.centerYAnchor.constraint(equalTo: titlePill.centerYAnchor),
+            titleCountLabel.trailingAnchor.constraint(equalTo: titlePill.trailingAnchor, constant: -12),
+            titleCountLabel.centerYAnchor.constraint(equalTo: titlePill.centerYAnchor),
+            titleCountLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 18)
         ])
 
         searchToggleButton.onClick = { [weak self] in self?.toggleSearch() }
@@ -882,13 +932,13 @@ final class PanelController: NSObject {
 
         // 搜索框居中、固定为 toolbar 宽度的 ~60%（带上下限），保持合适比例不撑满。
         // 1) 中心对齐 toolbar 中线  2) 等比宽度 60%  3) 不允许超过左/右两侧按钮组
-        searchField.placeholder = L10n.t("panel.searchPlaceholder")
+        searchField.placeholder = ""
         searchField.onTextChange = { [weak self] text in
             guard let self else { return }
-            self.reloadData()
-            if text.isEmpty {
-                self.collapseEmptySearch()
+            if self.searchInputPrimed {
+                self.revealPrimedSearch()
             }
+            self.scheduleSearchReload(for: text)
         }
         searchField.onCommitOrCancel = { [weak self] in self?.handleSearchCommitOrCancel() }
         searchField.onHorizontalNavigation = { [weak self] delta in self?.moveSelection(by: delta) }
@@ -937,7 +987,8 @@ final class PanelController: NSObject {
     private weak var toolbarCenterGroup: NSStackView?
 
     private func toggleSearch() {
-        if searchField.isHidden {
+        if searchField.isHidden || searchInputPrimed || searchField.alphaValue < 0.05 {
+            suppressEmptySearchCollapseUntil = Date().addingTimeInterval(0.45)
             focusSearch()
         } else {
             setSearchInline(false)
@@ -953,6 +1004,10 @@ final class PanelController: NSObject {
 
     /// 失焦或回车：如果搜索框为空，自动收起回初始按钮态。
     private func handleSearchCommitOrCancel() {
+        guard !searchInputPrimed else { return }
+        if let suppressUntil = suppressEmptySearchCollapseUntil, Date() < suppressUntil {
+            return
+        }
         if searchField.stringValue.isEmpty {
             collapseEmptySearch()
         }
@@ -960,13 +1015,18 @@ final class PanelController: NSObject {
 
     private func collapseEmptySearch() {
         guard !searchField.isHidden else { return }
-        setSearchInline(false)
+        setSearchInline(false, rePrimeWhenHidden: window.isVisible && !usesCardHandStyle)
     }
 
     private func resetSearchStateForNextShow() {
+        searchReloadTask?.cancel()
+        searchReloadTask = nil
         searchField.layer?.removeAllAnimations()
         toolbarLeftGroup?.layer?.removeAllAnimations()
         toolbarCenterGroup?.layer?.removeAllAnimations()
+        searchInputPrimed = false
+        suppressEmptySearchCollapseUntil = nil
+        searchField.ignoresMouseEvents = false
         searchField.stringValue = ""
         searchField.isHidden = true
         searchField.alphaValue = 0
@@ -979,9 +1039,58 @@ final class PanelController: NSObject {
         window.makeFirstResponder(nil)
     }
 
+    private func scheduleSearchReload(for text: String) {
+        searchReloadTask?.cancel()
+        let delay: UInt64 = text.isEmpty ? 35_000_000 : 85_000_000
+        searchReloadTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.searchReloadTask = nil
+            self.reloadData()
+            if text.isEmpty {
+                self.collapseEmptySearch()
+            }
+        }
+    }
+
+    private func flushPendingSearchReload() {
+        guard searchReloadTask != nil else { return }
+        searchReloadTask?.cancel()
+        searchReloadTask = nil
+        reloadData()
+        if searchField.stringValue.isEmpty {
+            collapseEmptySearch()
+        }
+    }
+
+    private func primeSearchInput() {
+        searchField.layer?.removeAllAnimations()
+        toolbarLeftGroup?.layer?.removeAllAnimations()
+        toolbarCenterGroup?.layer?.removeAllAnimations()
+
+        searchInputPrimed = true
+        suppressEmptySearchCollapseUntil = nil
+        searchField.ignoresMouseEvents = true
+        searchToggleButton.isActive = false
+        searchField.isHidden = false
+        searchField.alphaValue = 0
+        searchField.stringValue = ""
+        searchField.layer?.setAffineTransform(.identity)
+        toolbarLeftGroup?.isHidden = false
+        toolbarCenterGroup?.isHidden = false
+        toolbarLeftGroup?.alphaValue = 1
+        toolbarCenterGroup?.alphaValue = 1
+        searchField.focusTextInput()
+    }
+
+    private func revealPrimedSearch() {
+        guard searchInputPrimed else { return }
+        setSearchInline(true)
+    }
+
     /// 内联展开/收起搜索框：动画过渡 — 三组按钮淡出 + 搜索框淡入并轻微放大。
     /// 整个 toolbar 行高度不变，因此卡片不会被往下推。
-    private func setSearchInline(_ visible: Bool) {
+    private func setSearchInline(_ visible: Bool, rePrimeWhenHidden: Bool = false) {
         // 取消可能正在进行的动画，避免叠加
         searchField.layer?.removeAllAnimations()
         toolbarLeftGroup?.layer?.removeAllAnimations()
@@ -992,6 +1101,8 @@ final class PanelController: NSObject {
         toolbarLeftGroup?.wantsLayer = true
         toolbarCenterGroup?.wantsLayer = true
 
+        searchInputPrimed = false
+        searchField.ignoresMouseEvents = false
         searchToggleButton.isActive = visible
 
         if visible {
@@ -1047,6 +1158,9 @@ final class PanelController: NSObject {
                     CATransaction.setDisableActions(true)
                     self.searchField.layer?.setAffineTransform(.identity)
                     CATransaction.commit()
+                    if rePrimeWhenHidden, self.window.isVisible, !self.usesCardHandStyle {
+                        self.primeSearchInput()
+                    }
                 }
             }
 
@@ -2136,27 +2250,26 @@ final class PanelController: NSObject {
 
     // MARK: - Key handling
 
+    private func preparePrimedSearchForKeyDown(_ event: NSEvent) {
+        guard searchInputPrimed else { return }
+        guard formatPicker == nil else { return }
+
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard mods.isEmpty else { return }
+        guard let characters = event.characters,
+              characters.count == 1,
+              let scalar = characters.unicodeScalars.first,
+              !CharacterSet.controlCharacters.contains(scalar) else {
+            return
+        }
+
+        revealPrimedSearch()
+    }
+
     private func handleKey(_ event: NSEvent) -> Bool {
         if handlePanelShortcut(event) {
             return true
         }
-
-        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        let isEditingSearch = window.firstResponder === searchField.currentEditor()
-        let noMods = mods.isEmpty
-
-        if noMods,
-           let characters = event.characters,
-           characters.count == 1,
-           let scalar = characters.unicodeScalars.first,
-           !CharacterSet.controlCharacters.contains(scalar) {
-            if isEditingSearch {
-                return false
-            }
-            appendSearchCharacter(characters.lowercased())
-            return true
-        }
-
         return false
     }
 
@@ -2171,7 +2284,18 @@ final class PanelController: NSObject {
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         updateShortcutHints(for: event.modifierFlags)
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        let isEditingSearch = window.firstResponder === searchField.currentEditor()
+        let searchEditor = searchField.currentEditor()
+        let isEditingSearch = window.firstResponder === searchEditor
+        let searchHasMarkedText = isEditingSearch && ((searchEditor as? NSTextInputClient)?.hasMarkedText() == true)
+
+        if searchHasMarkedText {
+            switch event.keyCode {
+            case 36, 48, 53, 76, 123, 124, 125, 126:
+                return false
+            default:
+                break
+            }
+        }
 
         if event.keyCode == 53 {
             hideAnimated()
@@ -2185,6 +2309,7 @@ final class PanelController: NSObject {
         let noMods = mods.isEmpty
 
         if isReturn {
+            flushPendingSearchReload()
             if shiftOnly || cmdShift {
                 pasteSelected(transform: .plain)
                 return true
@@ -2194,11 +2319,13 @@ final class PanelController: NSObject {
         }
 
         if event.keyCode == 48 && noMods {
+            flushPendingSearchReload()
             completeSearchToken()
             return true
         }
 
         if cmdOnly && key == "c" {
+            flushPendingSearchReload()
             copySelected(transform: .original)
             return true
         }
@@ -2242,15 +2369,18 @@ final class PanelController: NSObject {
         }
 
         if (cmdOnly || cmdShift), let digit = Int(key), digit >= 1, digit <= 9 {
+            flushPendingSearchReload()
             quickPaste(index: digit - 1, transform: cmdShift ? .plain : .original)
             return true
         }
 
-        if event.keyCode == 123 || (!isEditingSearch && noMods && key == "h") {
+        if event.keyCode == 123 {
+            flushPendingSearchReload()
             moveSelection(by: -1)
             return true
         }
-        if event.keyCode == 124 || (!isEditingSearch && noMods && key == "l") {
+        if event.keyCode == 124 {
+            flushPendingSearchReload()
             moveSelection(by: 1)
             return true
         }
@@ -2463,18 +2593,17 @@ final class PanelController: NSObject {
 
     private func focusSearch(withPrefix prefix: String?) {
         setSearchInline(true)
-        window.makeFirstResponder(searchField)
+        searchField.focusTextInput()
         if let prefix {
             searchField.stringValue = prefix
             reloadData()
         }
-        searchField.currentEditor()?.selectedRange = NSRange(location: searchField.stringValue.count, length: 0)
     }
 
     private func appendSearchCharacter(_ character: String) {
         guard character.isEmpty == false else { return }
         setSearchInline(true)
-        window.makeFirstResponder(searchField)
+        searchField.focusTextInput()
         searchField.stringValue += character
         reloadData()
         searchField.currentEditor()?.selectedRange = NSRange(location: searchField.stringValue.count, length: 0)
@@ -2483,7 +2612,7 @@ final class PanelController: NSObject {
     private func deleteSearchCharacter() {
         guard !searchField.stringValue.isEmpty else { return }
         setSearchInline(true)
-        window.makeFirstResponder(searchField)
+        searchField.focusTextInput()
         searchField.stringValue.removeLast()
         reloadData()
         if searchField.stringValue.isEmpty {
@@ -2495,7 +2624,7 @@ final class PanelController: NSObject {
 
     private func completeSearchToken() {
         setSearchInline(true)
-        window.makeFirstResponder(searchField)
+        searchField.focusTextInput()
 
         let value = searchField.stringValue
         let prefixEnd = value.endIndex
@@ -2547,7 +2676,7 @@ final class PanelController: NSObject {
             let finalTransform = effectiveTransform(transform, for: item)
             resetSearchStateForNextShow()
             window.orderOut(nil)
-            NSApp.deactivate()
+            deactivateAfterPanel()
             if store.preferences.pasteDestination == .clipboard {
                 try clipboardController.copy(item, transform: finalTransform)
             } else {
@@ -2953,6 +3082,7 @@ extension PanelController: NSWindowDelegate {
 
 @MainActor
 private final class QuickPanel: NSPanel {
+    var keyPreprocessor: ((NSEvent) -> Void)?
     var keyHandler: ((NSEvent) -> Bool)?
     var modifierHandler: ((NSEvent.ModifierFlags) -> Void)?
 
@@ -2961,6 +3091,13 @@ private final class QuickPanel: NSPanel {
 
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown {
+            keyPreprocessor?(event)
+        }
+        super.sendEvent(event)
     }
 
     override func keyDown(with event: NSEvent) {
