@@ -118,7 +118,6 @@ final class PanelController: NSObject {
     nonisolated(unsafe) private var themeObserver: NSObjectProtocol?
     nonisolated(unsafe) private var glassCapabilityObserver: NSObjectProtocol?
     private var modifierPollTimer: Timer?
-    private var promotedActivationForSearch = false
     private var previousSearchInputSource: TISInputSource?
     private var searchInputPrimed = false
     private var suppressEmptySearchCollapseUntil: Date?
@@ -129,6 +128,7 @@ final class PanelController: NSObject {
     private var settingsWindowController: SettingsWindowController?
     private var lastRenderedCardSignature: CardRenderSignature?
     private var renderedCardCount = 0
+    private var hiddenPrewarmTask: Task<Void, Never>?
     private let minimumInitialCardRenderLimit = 8
     private let maximumInitialCardRenderLimit = 14
     private let cardRenderBatchSize = 10
@@ -306,10 +306,18 @@ final class PanelController: NSObject {
         positionWindow()        // 先确定 window 大小
         reloadData(scrollBehavior: .leading, mode: .initialLightweight)
         updateShortcutHints(for: NSEvent.modifierFlags)
+        let animateStart = EasyPasteDiagnostics.now()
         showAnimated()
+        EasyPasteDiagnostics.log("panel.show.animateSetup", [
+            "ms": EasyPasteDiagnostics.elapsedMS(since: animateStart)
+        ])
         if !handStyle {
+            let activationStart = EasyPasteDiagnostics.now()
             activateForSearchInput()
             primeSearchInput()
+            EasyPasteDiagnostics.log("panel.show.searchActivation", [
+                "ms": EasyPasteDiagnostics.elapsedMS(since: activationStart)
+            ])
         }
         EasyPasteDiagnostics.log("panel.show.firstFrame", [
             "ms": EasyPasteDiagnostics.elapsedMS(since: showStart),
@@ -450,21 +458,25 @@ final class PanelController: NSObject {
     }
 
     private func activateForSearchInput() {
+        let inputSourceStart = EasyPasteDiagnostics.now()
         previousSearchInputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()
-        if NSApp.activationPolicy() != .regular {
-            promotedActivationForSearch = true
-            NSApp.setActivationPolicy(.regular)
-        }
+        EasyPasteDiagnostics.log("panel.show.searchActivation.inputSource", [
+            "ms": EasyPasteDiagnostics.elapsedMS(since: inputSourceStart)
+        ])
+        let activateStart = EasyPasteDiagnostics.now()
         NSApp.activate(ignoringOtherApps: true)
+        EasyPasteDiagnostics.log("panel.show.searchActivation.activate", [
+            "ms": EasyPasteDiagnostics.elapsedMS(since: activateStart)
+        ])
+        let restoreStart = EasyPasteDiagnostics.now()
         restoreSearchInputSource()
+        EasyPasteDiagnostics.log("panel.show.searchActivation.restoreInput", [
+            "ms": EasyPasteDiagnostics.elapsedMS(since: restoreStart)
+        ])
     }
 
     private func deactivateAfterPanel() {
         NSApp.deactivate()
-        if promotedActivationForSearch {
-            promotedActivationForSearch = false
-            NSApp.setActivationPolicy(.accessory)
-        }
         previousSearchInputSource = nil
     }
 
@@ -538,6 +550,7 @@ final class PanelController: NSObject {
     func storeDidChange() {
         guard window.isVisible else {
             lastRenderedCardSignature = nil
+            scheduleHiddenPrewarm()
             return
         }
         let previousFirstID = visibleItems.first?.id
@@ -552,6 +565,29 @@ final class PanelController: NSObject {
 
     func openSettingsFromMenu() {
         openSettings()
+    }
+
+    func prewarmForNextShow() {
+        guard !window.isVisible else { return }
+        let start = EasyPasteDiagnostics.now()
+        positionWindow()
+        reloadData(scrollBehavior: .leading, mode: .initialLightweight)
+        updateShortcutHints(for: NSEvent.modifierFlags)
+        EasyPasteDiagnostics.log("panel.prewarm", [
+            "visible": "\(visibleItems.count)",
+            "rendered": "\(renderedCardCount)",
+            "ms": EasyPasteDiagnostics.elapsedMS(since: start)
+        ])
+    }
+
+    private func scheduleHiddenPrewarm() {
+        hiddenPrewarmTask?.cancel()
+        hiddenPrewarmTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard let self, !Task.isCancelled, !self.window.isVisible else { return }
+            self.prewarmForNextShow()
+            self.hiddenPrewarmTask = nil
+        }
     }
 
     func prepareForLocalDataCleanup() {
@@ -1064,6 +1100,7 @@ final class PanelController: NSObject {
     }
 
     private func primeSearchInput() {
+        let primeStart = EasyPasteDiagnostics.now()
         searchField.layer?.removeAllAnimations()
         toolbarLeftGroup?.layer?.removeAllAnimations()
         toolbarCenterGroup?.layer?.removeAllAnimations()
@@ -1080,7 +1117,14 @@ final class PanelController: NSObject {
         toolbarCenterGroup?.isHidden = false
         toolbarLeftGroup?.alphaValue = 1
         toolbarCenterGroup?.alphaValue = 1
+        EasyPasteDiagnostics.log("panel.show.searchActivation.primePrepare", [
+            "ms": EasyPasteDiagnostics.elapsedMS(since: primeStart)
+        ])
+        let focusStart = EasyPasteDiagnostics.now()
         searchField.focusTextInput()
+        EasyPasteDiagnostics.log("panel.show.searchActivation.primeFocus", [
+            "ms": EasyPasteDiagnostics.elapsedMS(since: focusStart)
+        ])
     }
 
     private func revealPrimedSearch() {
@@ -1185,7 +1229,6 @@ final class PanelController: NSObject {
 
     private func setTabsVisible(_ visible: Bool) {
         tabStrip.isHidden = !visible
-        titlePill.isHidden = visible
         addButton.isHidden = visible
     }
 
@@ -1326,7 +1369,7 @@ final class PanelController: NSObject {
             "to": "\(cardStack.arrangedSubviews.count)",
             "ms": EasyPasteDiagnostics.elapsedMS(since: appendStart)
         ])
-        if window.isVisible || mode == .initialLightweight {
+        if window.isVisible {
             hydrateRenderedCards()
         }
         updateCardPresentation()
@@ -1403,7 +1446,7 @@ final class PanelController: NSObject {
             removeHandCard(card, id: id, animated: animateEdgeChanges)
         }
         renderedCardCount = desiredItems.count
-        if window.isVisible || mode == .initialLightweight {
+        if window.isVisible {
             hydrateRenderedCards()
         }
         updateCardPresentation()
@@ -1859,7 +1902,7 @@ final class PanelController: NSObject {
         )
         registerQuickPasteHotKey(
             keyCode: UInt32(kVK_Delete),
-            modifiers: 0,
+            modifiers: UInt32(cmdKey),
             hotKeyID: EventHotKeyID(signature: signature, id: 502)
         )
         registerSearchCharacterHotKeys(signature: signature)
@@ -1956,7 +1999,7 @@ final class PanelController: NSObject {
         } else if shortcutID == 501 {
             completeSearchToken()
         } else if shortcutID == 502 {
-            deleteSearchCharacter()
+            deleteSelected()
         } else if let character = quickPasteInputCharacters[shortcutID] {
             appendSearchCharacter(character)
         }
@@ -2307,6 +2350,7 @@ final class PanelController: NSObject {
         let shiftOnly = mods == .shift
         let cmdShift = mods == [.command, .shift]
         let noMods = mods.isEmpty
+        let isDeleteKey = event.keyCode == 51 || event.keyCode == 117
 
         if isReturn {
             flushPendingSearchReload()
@@ -2385,7 +2429,7 @@ final class PanelController: NSObject {
             return true
         }
 
-        if !isEditingSearch && (event.keyCode == 51 || event.keyCode == 117) {
+        if cmdOnly && isDeleteKey && !searchHasMarkedText {
             deleteSelected()
             return true
         }
@@ -2949,7 +2993,7 @@ final class PanelController: NSObject {
         menu.addItem(copyPlain)
         menu.addItem(NSMenuItem(title: L10n.t("menu.formatPaste"), action: #selector(presentFormatPickerAction), keyEquivalent: ""))
         let deleteItem = NSMenuItem(title: L10n.t("menu.delete"), action: #selector(deleteSelected), keyEquivalent: "\u{8}")
-        deleteItem.keyEquivalentModifierMask = []
+        deleteItem.keyEquivalentModifierMask = [.command]
         menu.addItem(deleteItem)
         menu.addItem(NSMenuItem.separator())
 

@@ -1226,11 +1226,12 @@ final class ClipCardView: NSView {
     }
 
     private func applyHydration() {
+        let shouldHydrateRichPreview = visualStyle == .classic && item.kind == .text
         let payload = ClipCardHydrationPayload(
             icon: displayAppIcon(allowsExpensiveLoad: false),
             headerColor: headerColor(allowsExpensiveLoad: false),
             image: hydratedPreviewImage(),
-            richPreview: visualStyle == .classic && item.kind != .image ? richPreviewText : nil
+            richPreview: shouldHydrateRichPreview ? richPreviewText : nil
         )
         hydrateSourceIconAsync()
 
