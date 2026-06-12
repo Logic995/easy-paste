@@ -8,9 +8,13 @@ public enum ClipboardSearch {
         calendar: Calendar = .current,
         now: Date = Date()
     ) -> [ClipboardItem] {
-        items.filter { item in
+        let parsedTokens = tokens(from: query).map { $0.lowercased() }
+        guard !parsedTokens.isEmpty else {
+            return items.filter { matchesSelector($0, selector: selector) }
+        }
+        return items.filter { item in
             matchesSelector(item, selector: selector)
-                && tokens(from: query).allSatisfy { matchesToken($0, item: item, calendar: calendar, now: now) }
+                && parsedTokens.allSatisfy { matchesToken($0, item: item, calendar: calendar, now: now) }
         }
     }
 
@@ -26,13 +30,11 @@ public enum ClipboardSearch {
     }
 
     private static func matchesToken(
-        _ token: String,
+        _ lower: String,
         item: ClipboardItem,
         calendar: Calendar,
         now: Date
     ) -> Bool {
-        let lower = token.lowercased()
-
         if lower == "pinned" {
             return item.pinned
         }
