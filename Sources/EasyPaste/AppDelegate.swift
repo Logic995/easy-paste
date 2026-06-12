@@ -68,9 +68,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyController.register(shortcut: store.preferences.activationShortcut)
         startTrackingTargetApplication()
 
-        if ProcessInfo.processInfo.arguments.contains("--show-on-launch") {
+        let showOnLaunch = ProcessInfo.processInfo.arguments.contains("--show-on-launch")
+        if showOnLaunch {
             let target = launchTarget ?? currentExternalApplication() ?? lastTargetApplication
             panelController.show(targetApplication: target)
+        } else {
+            panelController.prewarmForNextShow()
         }
         if ProcessInfo.processInfo.arguments.contains("--show-settings-on-launch") {
             panelController.openSettingsFromMenu()
