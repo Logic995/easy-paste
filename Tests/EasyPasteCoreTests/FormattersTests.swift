@@ -195,4 +195,9 @@ import Testing
     #expect(store.items.count == 2)
     #expect(store.items[0].id == originalID)
     #expect(store.items[0].title == "First")
+
+    let reloaded = ClipboardStore(fileURL: store.fileURL)
+    try reloaded.load()
+    #expect(reloaded.items.count == 2)
+    #expect(reloaded.items[0].id == originalID)
 }

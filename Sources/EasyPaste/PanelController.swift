@@ -152,6 +152,9 @@ final class PanelController: NSObject {
     private let cardStack = NSStackView()
     private let handBackdropView = HandPanelBackdropView()
     private let handCardLayer = HandCardLayerView()
+    private let handCountBadge = NSView()
+    private let handCountIcon = NSImageView()
+    private let handCountLabel = NSTextField(labelWithString: "0")
     private weak var toolbarView: NSView?
     private weak var emptyView: NSView?
 
@@ -696,6 +699,7 @@ final class PanelController: NSObject {
         }
         titleLabel.stringValue = boardName
         titleCountLabel.stringValue = "\(visibleItems.count)"
+        handCountLabel.stringValue = "\(visibleItems.count)"
     }
 
     // MARK: - Build
@@ -786,11 +790,13 @@ final class PanelController: NSObject {
         handCardLayer.wantsLayer = true
         handCardLayer.layer?.masksToBounds = false
         handCardLayer.isHidden = true
+        configureHandCountBadge()
 
         content.addSubview(toolbar)
         content.addSubview(scrollView)
         content.addSubview(handBackdropView)
         content.addSubview(handCardLayer)
+        content.addSubview(handCountBadge)
 
         let m = PanelLayout.current
         let hPad = m.hPad
@@ -834,9 +840,53 @@ final class PanelController: NSObject {
             handCardLayer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             handCardLayer.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             handCardLayer.topAnchor.constraint(equalTo: content.topAnchor),
-            handCardLayer.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            handCardLayer.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+
+            handCountBadge.topAnchor.constraint(equalTo: content.topAnchor, constant: vTop),
+            handCountBadge.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -hPad),
+            handCountBadge.heightAnchor.constraint(equalToConstant: m.toolbarHeight),
+            handCountBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 56)
         ])
         applyTheme()
+    }
+
+    private func configureHandCountBadge() {
+        handCountBadge.translatesAutoresizingMaskIntoConstraints = false
+        handCountBadge.wantsLayer = true
+        handCountBadge.layer?.cornerRadius = PanelLayout.current.toolbarButtonRadius
+        handCountBadge.layer?.borderWidth = 0.6
+        handCountBadge.layer?.zPosition = 10_000
+        handCountBadge.isHidden = true
+
+        if let img = NSImage(systemSymbolName: "rectangle.stack.fill", accessibilityDescription: nil) {
+            let config = NSImage.SymbolConfiguration(pointSize: 12 * PanelLayout.current.scale, weight: .semibold)
+            handCountIcon.image = img.withSymbolConfiguration(config)
+        }
+        handCountIcon.imageScaling = .scaleProportionallyDown
+        handCountIcon.translatesAutoresizingMaskIntoConstraints = false
+
+        handCountLabel.font = .monospacedDigitSystemFont(ofSize: max(11, PanelLayout.current.pillFontSize), weight: .bold)
+        handCountLabel.alignment = .right
+        handCountLabel.backgroundColor = .clear
+        handCountLabel.lineBreakMode = .byClipping
+        handCountLabel.setContentHuggingPriority(.required, for: .horizontal)
+        handCountLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        handCountLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        handCountBadge.addSubview(handCountIcon)
+        handCountBadge.addSubview(handCountLabel)
+
+        NSLayoutConstraint.activate([
+            handCountIcon.leadingAnchor.constraint(equalTo: handCountBadge.leadingAnchor, constant: 10),
+            handCountIcon.centerYAnchor.constraint(equalTo: handCountBadge.centerYAnchor),
+            handCountIcon.widthAnchor.constraint(equalToConstant: PanelLayout.current.toolbarSymbolSize),
+            handCountIcon.heightAnchor.constraint(equalToConstant: PanelLayout.current.toolbarSymbolSize),
+
+            handCountLabel.leadingAnchor.constraint(equalTo: handCountIcon.trailingAnchor, constant: 7),
+            handCountLabel.trailingAnchor.constraint(equalTo: handCountBadge.trailingAnchor, constant: -10),
+            handCountLabel.centerYAnchor.constraint(equalTo: handCountBadge.centerYAnchor),
+            handCountLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 18)
+        ])
     }
 
     private func applyTheme() {
@@ -864,6 +914,7 @@ final class PanelController: NSObject {
         handBackdropView.isHidden = !handStyle
         handBackdropView.needsDisplay = true
         handCardLayer.isHidden = !handStyle
+        handCountBadge.isHidden = !handStyle
         if !handStyle {
             stopHandMotionTimer()
         } else if window.isVisible {
@@ -881,6 +932,10 @@ final class PanelController: NSObject {
         titleLabel.textColor = theme.pillText
         titleCountLabel.textColor = theme.pillText.withAlphaComponent(0.62)
         clipboardIcon.contentTintColor = theme.pillText
+        handCountBadge.layer?.backgroundColor = theme.handBadgeBackground.cgColor
+        handCountBadge.layer?.borderColor = theme.handBadgeBorder.cgColor
+        handCountIcon.contentTintColor = theme.handSecondaryText
+        handCountLabel.textColor = theme.handPrimaryText
 
         searchToggleButton.applyTheme(theme)
         addButton.applyTheme(theme)
@@ -908,11 +963,16 @@ final class PanelController: NSObject {
 
         titleLabel.font = .systemFont(ofSize: PanelLayout.current.pillFontSize, weight: .medium)
         titleLabel.backgroundColor = .clear
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         titleCountLabel.font = .monospacedDigitSystemFont(ofSize: max(10, PanelLayout.current.pillFontSize - 1), weight: .semibold)
         titleCountLabel.backgroundColor = .clear
         titleCountLabel.alignment = .right
+        titleCountLabel.lineBreakMode = .byClipping
+        titleCountLabel.setContentHuggingPriority(.required, for: .horizontal)
+        titleCountLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         titleCountLabel.translatesAutoresizingMaskIntoConstraints = false
 
         titlePill.addSubview(clipboardIcon)

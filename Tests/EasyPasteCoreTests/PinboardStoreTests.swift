@@ -58,6 +58,20 @@ private func makeItem(_ tag: String, hash: String? = nil) -> ClipboardItem {
     #expect(store.activeBoardSelector == .all)
 }
 
+@Test @MainActor func setActiveBoardPersistsWithoutFullStoreRewrite() throws {
+    let store = makeStore()
+    let board = try store.createBoard(name: "Fast")
+    try store.upsert(makeItem("kept"))
+
+    try store.setActiveBoard(.board(board.id))
+
+    let reloaded = ClipboardStore(fileURL: store.fileURL)
+    try reloaded.load()
+    #expect(reloaded.activeBoardSelector == .board(board.id))
+    #expect(reloaded.items.map(\.hash) == ["h-kept"])
+    #expect(reloaded.pinboards.map(\.id) == [board.id])
+}
+
 @Test @MainActor func itemsInSelectorScopesCorrectly() throws {
     let store = makeStore()
     let work = try store.createBoard(name: "Work")

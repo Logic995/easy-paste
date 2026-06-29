@@ -84,6 +84,45 @@ enum SQLiteClipboardPersistence {
         }
     }
 
+    static func saveActiveBoardSelector(
+        _ selector: BoardSelectorRaw,
+        toStateFile fileURL: URL,
+        fallbackState: EasyPasteState
+    ) throws {
+        let databaseURL = databaseURL(forStateFile: fileURL)
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+            try save(fallbackState, toStateFile: fileURL)
+            return
+        }
+
+        let db = try Database(url: databaseURL)
+        defer { db.close() }
+        try createSchema(in: db)
+        try saveJSON(in: db, key: "activeBoardSelector", value: selector)
+    }
+
+    static func saveItemUpdatedAt(
+        itemID: UUID,
+        updatedAt: Date,
+        toStateFile fileURL: URL,
+        fallbackState: EasyPasteState
+    ) throws {
+        let databaseURL = databaseURL(forStateFile: fileURL)
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+            try save(fallbackState, toStateFile: fileURL)
+            return
+        }
+
+        let db = try Database(url: databaseURL)
+        defer { db.close() }
+        try createSchema(in: db)
+        let statement = try db.prepare("UPDATE items SET updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, updatedAt.timeIntervalSinceReferenceDate)
+        bindText(statement, index: 2, value: itemID.uuidString)
+        try db.stepDone(statement)
+    }
+
     static func backupLegacyStateFileIfNeeded(_ fileURL: URL) {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         let formatter = DateFormatter()

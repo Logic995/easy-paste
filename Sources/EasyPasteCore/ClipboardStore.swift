@@ -154,9 +154,15 @@ public final class ClipboardStore {
             return
         }
 
-        items[index].updatedAt = Date()
+        let updatedAt = Date()
+        items[index].updatedAt = updatedAt
         sortAndTrim()
-        try save()
+        try SQLiteClipboardPersistence.saveItemUpdatedAt(
+            itemID: id,
+            updatedAt: updatedAt,
+            toStateFile: fileURL,
+            fallbackState: snapshot()
+        )
     }
 
     public func clearUnpinned() throws {
@@ -282,7 +288,11 @@ public final class ClipboardStore {
     public func setActiveBoard(_ selector: BoardSelector) throws {
         activeBoardSelector = selector
         validateActiveBoard()
-        try save()
+        try SQLiteClipboardPersistence.saveActiveBoardSelector(
+            BoardSelectorRaw(activeBoardSelector),
+            toStateFile: fileURL,
+            fallbackState: snapshot()
+        )
     }
 
     /// 列出全部可见的 board pill 顺序：[All, Pinned(有收藏时), …user boards (sortIndex 升序)]

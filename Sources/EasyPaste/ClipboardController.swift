@@ -732,13 +732,11 @@ final class ClipboardController {
 
             if await waitUntilFrontmost(target, timeout: 0.85) == false {
                 activate(target)
-                try? await Task.sleep(nanoseconds: 120_000_000)
-            } else {
-                try? await Task.sleep(nanoseconds: 70_000_000)
+                try? await Task.sleep(nanoseconds: 60_000_000)
             }
         } else {
             NSApp.deactivate()
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            try? await Task.sleep(nanoseconds: 60_000_000)
         }
 
         promptForAccessibilityIfNeeded()
