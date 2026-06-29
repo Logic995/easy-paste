@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254">
+  <defs>
+    <clipPath id="appIconShape">
+      <rect x="27" y="16" width="1200" height="1220" rx="236"/>
+    </clipPath>
+  </defs>
+  <image
+    href="AppIcon-generated-source.png"
+    width="1254"
+    height="1254"
+    clip-path="url(#appIconShape)"
+  />
+</svg>

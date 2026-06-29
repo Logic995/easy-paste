@@ -112,8 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "EP"
-        statusItem.button?.font = .systemFont(ofSize: 13, weight: .semibold)
+        statusItem.button?.image = EasyPasteIcon.statusBarImage()
+        statusItem.button?.imagePosition = .imageOnly
+        statusItem.button?.toolTip = "Easy Paste"
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: L10n.t("menu.show"), action: #selector(showPanelFromMenu), keyEquivalent: ""))
