@@ -743,7 +743,10 @@ final class ClipCardView: NSView {
 
         let icon = NSImageView()
         icon.image = displayAppIcon(allowsExpensiveLoad: renderMode == .hydrated) ?? fallbackIcon
-        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.contentTintColor = NSColor(calibratedWhite: 0.12, alpha: 0.88)
+        // Source app icons keep their natural size, while the lightweight
+        // content-kind fallback stays a restrained, centered glyph.
+        icon.imageScaling = .scaleProportionallyDown
         icon.translatesAutoresizingMaskIntoConstraints = false
         badgeIconView = icon
         badge.addSubview(icon)
@@ -768,7 +771,7 @@ final class ClipCardView: NSView {
         let icon = NSImageView()
         icon.image = handSymbolImage
         icon.contentTintColor = handAccentColor
-        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.imageScaling = .scaleProportionallyDown
         icon.translatesAutoresizingMaskIntoConstraints = false
         badge.addSubview(icon)
 
@@ -794,7 +797,7 @@ final class ClipCardView: NSView {
         let icon = NSImageView()
         icon.image = displayAppIcon(allowsExpensiveLoad: renderMode == .hydrated) ?? fallbackIcon
         icon.contentTintColor = handAccentColor.withAlphaComponent(0.92)
-        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.imageScaling = .scaleProportionallyDown
         icon.translatesAutoresizingMaskIntoConstraints = false
         badgeIconView = icon
         badge.addSubview(icon)
@@ -1118,12 +1121,14 @@ final class ClipCardView: NSView {
         layer?.shadowRadius = 0
         layer?.shadowOffset = .zero
         layer?.shadowPath = nil
-        selectionRing.layer?.borderWidth = isSelected ? 3.0 : (isHovering ? 1.0 : 0.0)
-        let hoverColor = EasyPasteThemeStore.effectiveTheme.isDark
+        let theme = EasyPasteThemeStore.effectiveTheme
+        selectionRing.layer?.borderWidth = isSelected ? 2.0 : (isHovering ? 0.8 : 0.0)
+        let selectedColor = NSColor.controlAccentColor.withAlphaComponent(theme.isDark ? 0.70 : 0.62)
+        let hoverColor = theme.isDark
             ? NSColor.white.withAlphaComponent(0.14)
             : NSColor.black.withAlphaComponent(0.12)
         selectionRing.layer?.borderColor = (isSelected
-            ? NSColor.controlAccentColor
+            ? selectedColor
             : hoverColor
         ).cgColor
         layer?.setAffineTransform(presentationTransform)
@@ -1241,9 +1246,7 @@ final class ClipCardView: NSView {
             }
         }
 
-        if let icon = payload.icon {
-            badgeIconView?.image = icon
-        }
+        badgeIconView?.image = payload.icon ?? fallbackIcon
 
         if let image = payload.image, item.kind == .image {
             imagePreviewView?.image = image
@@ -1315,9 +1318,14 @@ final class ClipCardView: NSView {
         return NSImage(data: data)
     }
 
-    private var placeholderImage: NSImage? {
-        let image = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)
-        return image?.withSymbolConfiguration(.init(pointSize: metrics.badgeFontSize + 6, weight: .medium))
+    private var placeholderImage: NSImage {
+        EasyPasteIcon.symbol(
+            named: "photo",
+            fallbacks: ["doc"],
+            accessibilityDescription: "图片",
+            pointSize: metrics.badgeFontSize + 6,
+            weight: .medium
+        )
     }
 
     private func headerColor(allowsExpensiveLoad: Bool) -> NSColor {
@@ -1381,28 +1389,44 @@ final class ClipCardView: NSView {
         EasyPasteThemeStore.effectiveTheme.handMutedText
     }
 
-    private var handSymbolImage: NSImage? {
+    private var handSymbolImage: NSImage {
         let name: String
+        let fallbacks: [String]
+        let accessibilityDescription: String
         if item.pinned {
             name = "pin.fill"
+            fallbacks = ["pin", "bookmark.fill"]
+            accessibilityDescription = "已固定"
         } else {
+            accessibilityDescription = kindLabel
             switch item.kind {
             case .text:
                 name = "text.alignleft"
+                fallbacks = ["doc.plaintext", "doc"]
             case .image:
                 name = "photo"
+                fallbacks = ["doc"]
             case .json, .xml, .yaml:
                 name = "curlybraces"
+                fallbacks = ["doc.plaintext", "doc"]
             case .sql:
                 name = "tablecells"
+                fallbacks = ["doc.plaintext", "doc"]
             case .code, .markdown:
                 name = "chevron.left.forwardslash.chevron.right"
+                fallbacks = ["doc.plaintext", "doc"]
             case .url:
                 name = "link"
+                fallbacks = ["globe", "doc"]
             }
         }
-        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: metrics.badgeFontSize, weight: .medium))
+        return EasyPasteIcon.symbol(
+            named: name,
+            fallbacks: fallbacks,
+            accessibilityDescription: accessibilityDescription,
+            pointSize: metrics.badgeFontSize,
+            weight: .medium
+        )
     }
 
     private var headerTitle: String {
@@ -1469,16 +1493,30 @@ final class ClipCardView: NSView {
         return icon
     }
 
-    private var fallbackIcon: NSImage? {
+    private var fallbackIcon: NSImage {
         let symbol: String
+        let fallbacks: [String]
         switch item.kind {
-        case .text: symbol = "text.alignleft"
-        case .url: symbol = "link"
-        case .json, .xml, .yaml, .sql, .markdown, .code: symbol = "chevron.left.forwardslash.chevron.right"
-        case .image: symbol = "photo"
+        case .text:
+            symbol = "text.alignleft"
+            fallbacks = ["doc.plaintext", "doc"]
+        case .url:
+            symbol = "link"
+            fallbacks = ["globe", "doc"]
+        case .json, .xml, .yaml, .sql, .markdown, .code:
+            symbol = "chevron.left.forwardslash.chevron.right"
+            fallbacks = ["doc.plaintext", "doc"]
+        case .image:
+            symbol = "photo"
+            fallbacks = ["doc"]
         }
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        return image?.withSymbolConfiguration(.init(pointSize: metrics.badgeFontSize, weight: .semibold))
+        return EasyPasteIcon.symbol(
+            named: symbol,
+            fallbacks: fallbacks,
+            accessibilityDescription: kindLabel,
+            pointSize: metrics.badgeFontSize,
+            weight: .semibold
+        )
     }
 
     private var imageInfoText: String {
@@ -2390,10 +2428,13 @@ final class EmptyClipView: NSView {
         iconWrap.translatesAutoresizingMaskIntoConstraints = false
 
         let iconView = NSImageView()
-        if let img = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil) {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 26, weight: .medium)
-            iconView.image = img.withSymbolConfiguration(cfg)
-        }
+        iconView.image = EasyPasteIcon.symbol(
+            named: "doc.on.clipboard",
+            fallbacks: ["doc", "square"],
+            accessibilityDescription: "剪贴板为空",
+            pointSize: 26,
+            weight: .medium
+        )
         iconView.contentTintColor = NSColor.white.withAlphaComponent(0.55)
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconWrap.addSubview(iconView)

@@ -2,6 +2,36 @@ import AppKit
 
 @MainActor
 enum EasyPasteIcon {
+    /// Returns a configured SF Symbol and guarantees a visible image even when a
+    /// symbol is unavailable on the current macOS release.
+    static func symbol(
+        named name: String,
+        fallbacks: [String] = [],
+        accessibilityDescription: String,
+        pointSize: CGFloat,
+        weight: NSFont.Weight
+    ) -> NSImage {
+        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+        let candidates = [name] + fallbacks + ["square"]
+
+        for candidate in candidates {
+            guard let image = NSImage(
+                systemSymbolName: candidate,
+                accessibilityDescription: accessibilityDescription
+            ) else {
+                continue
+            }
+            let configured = image.withSymbolConfiguration(configuration) ?? image
+            configured.accessibilityDescription = accessibilityDescription
+            return configured
+        }
+
+        return fallbackGlyph(
+            accessibilityDescription: accessibilityDescription,
+            pointSize: pointSize
+        )
+    }
+
     static func statusBarImage() -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: false) { _ in
@@ -21,6 +51,43 @@ enum EasyPasteIcon {
         }
         image.isTemplate = true
         image.accessibilityDescription = "Easy Paste"
+        return image
+    }
+
+    /// Last-resort vector glyph for environments where SF Symbols cannot be
+    /// resolved. It follows the app icon's rounded-card language and is a
+    /// template image, so the surrounding control can tint it normally.
+    private static func fallbackGlyph(
+        accessibilityDescription: String,
+        pointSize: CGFloat
+    ) -> NSImage {
+        let side = max(12, ceil(pointSize * 1.25))
+        let size = NSSize(width: side, height: side)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let lineWidth = max(1.15, pointSize * 0.09)
+            let inset = lineWidth / 2 + side * 0.16
+            let cardFrame = rect.insetBy(dx: inset, dy: inset)
+            let card = NSBezierPath(
+                roundedRect: cardFrame,
+                xRadius: side * 0.14,
+                yRadius: side * 0.14
+            )
+            card.lineWidth = lineWidth
+            card.lineCapStyle = .round
+            card.lineJoinStyle = .round
+            NSColor.black.setStroke()
+            card.stroke()
+
+            let line = NSBezierPath()
+            line.lineWidth = lineWidth
+            line.lineCapStyle = .round
+            line.move(to: NSPoint(x: cardFrame.minX + side * 0.18, y: cardFrame.midY))
+            line.line(to: NSPoint(x: cardFrame.maxX - side * 0.18, y: cardFrame.midY))
+            line.stroke()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = accessibilityDescription
         return image
     }
 
