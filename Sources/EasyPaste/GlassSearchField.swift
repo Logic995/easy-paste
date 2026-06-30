@@ -44,10 +44,13 @@ final class GlassSearchField: NSView, NSTextFieldDelegate {
         layer?.masksToBounds = false
 
         // 放大镜 icon
-        if let img = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil) {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
-            icon.image = img.withSymbolConfiguration(cfg)
-        }
+        icon.image = EasyPasteIcon.symbol(
+            named: "magnifyingglass",
+            fallbacks: ["circle"],
+            accessibilityDescription: "搜索",
+            pointSize: 12,
+            weight: .medium
+        )
         icon.contentTintColor = EasyPasteThemeStore.effectiveTheme.secondaryText
         icon.translatesAutoresizingMaskIntoConstraints = false
         addSubview(icon)
@@ -70,10 +73,13 @@ final class GlassSearchField: NSView, NSTextFieldDelegate {
         clearButton.isBordered = false
         clearButton.bezelStyle = .inline
         clearButton.title = ""
-        if let img = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil) {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-            clearButton.image = img.withSymbolConfiguration(cfg)
-        }
+        clearButton.image = EasyPasteIcon.symbol(
+            named: "xmark.circle.fill",
+            fallbacks: ["xmark", "circle"],
+            accessibilityDescription: "清除搜索",
+            pointSize: 12,
+            weight: .regular
+        )
         clearButton.contentTintColor = EasyPasteThemeStore.effectiveTheme.secondaryText
         clearButton.target = self
         clearButton.action = #selector(handleClear)

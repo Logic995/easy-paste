@@ -858,10 +858,13 @@ final class PanelController: NSObject {
         handCountBadge.layer?.zPosition = 10_000
         handCountBadge.isHidden = true
 
-        if let img = NSImage(systemSymbolName: "rectangle.stack.fill", accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 12 * PanelLayout.current.scale, weight: .semibold)
-            handCountIcon.image = img.withSymbolConfiguration(config)
-        }
+        handCountIcon.image = EasyPasteIcon.symbol(
+            named: "rectangle.stack.fill",
+            fallbacks: ["square.stack.3d.up.fill", "rectangle.stack", "square.stack.3d.up"],
+            accessibilityDescription: "卡片数量",
+            pointSize: 12 * PanelLayout.current.scale,
+            weight: .semibold
+        )
         handCountIcon.imageScaling = .scaleProportionallyDown
         handCountIcon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -954,10 +957,13 @@ final class PanelController: NSObject {
         titlePill.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         titlePill.translatesAutoresizingMaskIntoConstraints = false
 
-        if let img = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 12 * PanelLayout.current.scale, weight: .medium)
-            clipboardIcon.image = img.withSymbolConfiguration(config)
-        }
+        clipboardIcon.image = EasyPasteIcon.symbol(
+            named: "clock.arrow.circlepath",
+            fallbacks: ["clock", "doc.on.clipboard", "doc"],
+            accessibilityDescription: "剪贴板历史",
+            pointSize: 12 * PanelLayout.current.scale,
+            weight: .medium
+        )
         clipboardIcon.imageScaling = .scaleProportionallyDown
         clipboardIcon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -2836,12 +2842,29 @@ final class PanelController: NSObject {
 
     @objc private func deleteSelected() {
         guard let item = selectedItem else { return }
+        let adjacentItemID = adjacentItemID(afterDeleting: item.id)
         do {
             try store.delete(id: item.id)
+            selectedItemID = adjacentItemID
             reloadData()
         } catch {
             NSLog("EasyPaste delete failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Keep the visual cursor where the deleted card was: prefer the card on
+    /// its right, and fall back to the one on its left when deleting the end.
+    private func adjacentItemID(afterDeleting itemID: UUID) -> UUID? {
+        guard let index = visibleItems.firstIndex(where: { $0.id == itemID }) else {
+            return nil
+        }
+        if visibleItems.indices.contains(index + 1) {
+            return visibleItems[index + 1].id
+        }
+        if index > 0 {
+            return visibleItems[index - 1].id
+        }
+        return nil
     }
 
     @objc private func togglePause() {
@@ -3329,10 +3352,22 @@ final class SymbolButton: NSView {
     }
 
     func setSymbol(_ name: String) {
-        if let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 13 * PanelLayout.current.scale, weight: .semibold)
-            imageView.image = image.withSymbolConfiguration(config)
+        let fallbacks: [String]
+        switch name {
+        case "magnifyingglass": fallbacks = ["circle"]
+        case "plus": fallbacks = ["plus.circle", "circle"]
+        case "pause.fill": fallbacks = ["pause", "pause.circle"]
+        case "play.fill": fallbacks = ["play", "play.circle"]
+        case "ellipsis": fallbacks = ["ellipsis.circle", "circle"]
+        default: fallbacks = ["circle"]
         }
+        imageView.image = EasyPasteIcon.symbol(
+            named: name,
+            fallbacks: fallbacks,
+            accessibilityDescription: toolTip ?? name,
+            pointSize: 13 * PanelLayout.current.scale,
+            weight: .semibold
+        )
     }
 
     override func updateTrackingAreas() {
